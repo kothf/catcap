@@ -23,7 +23,7 @@ Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 | OVL-06 Snap | 🟡 | Snaps to windows, not to UI elements |
 | OVL-07 Colour under cursor | ✅ | Shown in magnifier, `C` copies HEX |
 | OVL-08 Quick toolbar | ✅ | In the overlay (Capture/Copy/Edit/Pin) and after capture (Copy/Edit/Pin/Library/Discard) |
-| Draw in the overlay | ✅ | Flameshot-style tool column: pen, line, arrow, rectangle, ellipse, marker, text, steps, blur, pixelate, redact; colour, undo/redo, wheel for thickness. Saved as editable annotations |
+| Draw in the overlay | ✅ | Tool column beside the selection: pen, line, arrow, rectangle, ellipse, marker, text, steps, blur, pixelate, redact; colour, undo/redo, wheel for thickness. Saved as editable annotations |
 | OPT-01..03 | ✅ | Delay with countdown, cursor (X11), after-capture action |
 | OPT-04 | ✅ | Sound + notification toggles |
 | OPT-05/06 Presets | ⬜ | |

@@ -13,7 +13,7 @@
 ## 1. Introduction
 
 ### 1.1 Purpose
-This document specifies the functional and non-functional requirements for **CatCap**, a desktop application for Linux Mint that captures still screenshots, lets the user annotate and edit them, and keeps every capture in a searchable, organised **library**. CatCap is similar in scope to Snagit's image workflow. **Video and screen recording are out of scope.**
+This document specifies the functional and non-functional requirements for **CatCap**, a desktop application for Linux Mint that captures still screenshots, lets the user annotate and edit them, and keeps every capture in a searchable, organised **library**. **Video and screen recording are out of scope.**
 
 ### 1.2 Scope
 CatCap covers:
