@@ -67,6 +67,17 @@ class AppTestCase(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
 
+class IconTests(unittest.TestCase):
+    def test_app_icon_renders_without_the_svg_icon_plugin(self):
+        from catcap.app import app_icon
+
+        icon = app_icon()
+        self.assertFalse(icon.isNull())
+        self.assertIn(22, [s.width() for s in icon.availableSizes()])
+        pm = icon.pixmap(22, 22)
+        self.assertGreater(pm.toImage().pixelColor(11, 11).alpha(), 0)
+
+
 class EditorTests(AppTestCase):
     def test_every_tool_and_autosave(self):
         from catcap.editor import TOOLS

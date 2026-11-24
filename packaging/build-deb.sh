@@ -57,7 +57,7 @@ Priority: optional
 Architecture: all
 Installed-Size: ${SIZE}
 Depends: python3 (>= 3.10), python3-pyqt6, python3-pyqt6.qtsvg, python3-xlib
-Recommends: qt6-image-formats-plugins, qt6-wayland, xdg-desktop-portal, xdg-desktop-portal-xapp | xdg-desktop-portal-gtk, xdg-utils, libglib2.0-bin
+Recommends: qt6-svg-plugins, qt6-image-formats-plugins, qt6-wayland, xdg-desktop-portal, xdg-desktop-portal-xapp | xdg-desktop-portal-gtk, xdg-utils, libglib2.0-bin
 Suggests: gnome-session-canberra
 Maintainer: CatCap contributors <noreply@github.com>
 Homepage: https://github.com/kothf/catcap

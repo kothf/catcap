@@ -31,13 +31,39 @@ def icon_file() -> str:
     return f"/usr/share/icons/hicolor/scalable/apps/{APP_ID}.svg"
 
 
+def app_icon() -> QIcon:
+    """CatCap's icon as ready-made pixmaps.
+
+    QIcon only reads SVG through Qt's SVG icon engine plugin (qt6-svg-plugins), which is often not
+    installed; without it the tray shows the desktop's "missing icon" placeholder. QSvgRenderer
+    (python3-pyqt6.qtsvg, a hard dependency) always works, so the SVG is rendered here.
+    """
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QPainter, QPixmap
+    from PyQt6.QtSvg import QSvgRenderer
+
+    icon = QIcon()
+    renderer = QSvgRenderer(icon_file())
+    if renderer.isValid():
+        for size in (16, 22, 24, 32, 48, 64, 128, 256):
+            pm = QPixmap(size, size)
+            pm.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pm)
+            renderer.render(painter, QRectF(0, 0, size, size))
+            painter.end()
+            icon.addPixmap(pm)
+    if icon.isNull():
+        icon = QIcon.fromTheme(APP_ID)
+    return icon
+
+
 class CatCap:
     def __init__(self, qapp: QApplication):
         self.qapp = qapp
         self.config = Config()
         self.theme = Theme(self.config.get("general", "theme"))
         self.theme.apply(qapp)
-        self.app_icon = QIcon.fromTheme(APP_ID, QIcon(icon_file()))
+        self.app_icon = app_icon()
         self.tray_icon = self.app_icon
         qapp.setWindowIcon(self.app_icon)
         self.library = Library(self.config.images_dir())

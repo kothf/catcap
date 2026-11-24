@@ -4,7 +4,7 @@ set -euo pipefail
 
 required=(python3 python3-xlib xdg-utils libglib2.0-bin)
 qt=(python3-pyqt6 python3-pyqt6.qtsvg)
-optional=(qt6-image-formats-plugins qt6-wayland xdg-desktop-portal xdg-desktop-portal-xapp
+optional=(qt6-svg-plugins qt6-image-formats-plugins qt6-wayland xdg-desktop-portal xdg-desktop-portal-xapp
           xdg-desktop-portal-gtk dpkg-dev)
 
 available=()
