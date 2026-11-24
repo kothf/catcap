@@ -1,0 +1,44 @@
+name: Test and build .deb
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04   # same base as Linux Mint 21 (Python 3.10)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-3.0 \
+            python3-pil gir1.2-wnck-3.0 xvfb dbus-x11 dpkg-dev
+
+      - name: Unit tests
+        run: xvfb-run -a dbus-run-session -- /usr/bin/python3 -m unittest discover -s tests -v
+
+      - name: Build package
+        run: ./packaging/build-deb.sh
+
+      - name: Install package
+        run: |
+          sudo apt-get install -y ./dist/catcap_*_all.deb
+          catcap --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: catcap-deb
+          path: dist/*.deb
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb

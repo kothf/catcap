@@ -1,0 +1,79 @@
+# Implementation status (v0.1.0)
+
+Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
+
+## Capture
+| ID | Status | Notes |
+|---|---|---|
+| CAP-01 Full screen | ✅ | All monitors in one image |
+| CAP-02 Single monitor | ✅ | Monitor under the pointer |
+| CAP-03 Region | ✅ | Frozen-screen overlay |
+| CAP-04 Window | ✅ | Hover highlight + click (X11); portal picker (Wayland). Decorations on/off setting |
+| CAP-05 Active window | ✅ | Silent on X11; portal picker on Wayland |
+| CAP-06 Repeat last region | ✅ | |
+| CAP-07 Fixed-size region | ⬜ | |
+| CAP-08 Menu capture | 🟡 | Use a delayed capture (tray › Region after delay) |
+| CAP-09/11 Scrolling capture | ⬜ | |
+| CAP-10 Freehand region | ⬜ | |
+| OVL-01..05 Overlay basics | ✅ | Crosshair, size label, magnifier, arrow-key nudge, handles, Enter/double-click/Esc |
+| OVL-06 Snap | 🟡 | Snaps to windows, not to UI elements |
+| OVL-07 Colour under cursor | ✅ | Shown in magnifier, `C` copies HEX |
+| OVL-08 Quick toolbar | ✅ | In the overlay (Capture/Copy/Edit/Pin) and after capture (Copy/Edit/Pin/Library/Discard) |
+| OPT-01..03 | ✅ | Delay with countdown, cursor (X11), after-capture action |
+| OPT-04 | ✅ | Sound + notification toggles |
+| OPT-05/06 Presets | ⬜ | |
+| TRG-01/02 Hotkeys, Print Screen | ✅ | Cinnamon custom shortcuts (X11 + Wayland), Print takeover with restore, conflict warnings; libkeybinder on other X11 desktops |
+| TRG-03 Tray | ✅ | XApp status icon on Mint, AppIndicator / GtkStatusIcon fallback |
+| TRG-04 CLI | ✅ | `catcap --help` |
+| TRG-05 D-Bus API | ⬜ | |
+
+## Editor
+| ID | Status | Notes |
+|---|---|---|
+| EDT-01..05, 07, 09 | ✅ | Zoom/pan, non-destructive JSON, undo/redo, select/move/resize/reorder/duplicate/delete, properties bar, autosave, revert |
+| EDT-06 Quick styles | 🟡 | Each tool remembers its last style; no named style presets yet |
+| EDT-08 Filmstrip | ⬜ | |
+| ANN-01..09 | ✅ | Arrow (straight), line, rectangle, ellipse, text, callout, highlighter, pen, numbered steps (1,2,3 / A,B,C, auto-renumber), blur, pixelate |
+| ANN-10 Spotlight | ✅ | |
+| ANN-11..15 | ⬜ | Magnify, stamps, fill, smart redact, cursor overlay |
+| IMG-01..03 | ✅ | Crop (with aspect presets), resize, rotate, flip |
+| IMG-04..09 | ⬜ | Canvas expand, effects, cut-out, eyedropper in editor, combine, templates |
+| OCR-01..03 | ⬜ | |
+
+## Library
+| ID | Status | Notes |
+|---|---|---|
+| LIB-01..05 | ✅ | Auto-save, XDG locations, PNG + JSON sidecar, metadata incl. app/window title (X11), rebuild from disk |
+| LIB-06 Move library | ✅ | Settings › Library |
+| BRW-01..06 | ✅ | Grid + list, date groups (list view), sort, sidebar, preview pane, lazy thumbnails |
+| ORG-01..07 | ✅ | Rename, tags with autocomplete, collections (drag captures onto them), favourites, bulk actions, trash with auto-purge, notes |
+| ORG-08/09 | ⬜ | |
+| SRC-01/02 | ✅ | Instant search; filters for date, app, type, annotated; tag/collection via sidebar |
+| SRC-03/04 | ⬜ | |
+| IMP-01/02 | ✅ | File dialog, drag-and-drop, Ctrl+V |
+| IMP-03 | ⬜ | |
+
+## Output
+| ID | Status | Notes |
+|---|---|---|
+| OUT-01..06 | ✅ | Clipboard, PNG/JPG/WebP/BMP, PDF (multi-page), drag-and-drop, filename templates, open with / show in folder |
+| OUT-07 Email | ✅ | via `xdg-email` |
+| OUT-08 Pin | ✅ | |
+| OUT-09..11 | ⬜ | |
+
+## Settings, platform, packaging
+| Item | Status | Notes |
+|---|---|---|
+| SET-01..05, APP-01, APP-02, APP-04 | ✅ | |
+| APP-03 Localisation | ⬜ | Strings are not wrapped for gettext yet |
+| Wayland (NFR-C2) | ✅ | Portal capture, own overlay on the primary monitor, clear messages; tested against a mock portal, not yet on a real Cinnamon Wayland session |
+| HiDPI / multi-monitor | 🟡 | Scale-aware code, not yet tested on real hardware |
+| NFR-S3 Exclude windows | ⬜ | |
+| `.deb` package (NFR-D1) | ✅ | `packaging/build-deb.sh`, built in CI |
+| Flatpak (NFR-D2) | ⬜ | |
+
+## Tested so far
+- Unit tests: config, library, annotations, rendering/export, filename templates, hotkey parsing, and the Wayland portal flow against a mock `xdg-desktop-portal`.
+- GUI runs under Xvfb + Openbox: full/active/region capture, overlay, quick toolbar, editor tools, crop, library grid/list/preview, settings.
+- Cinnamon hotkey registration and Print Screen takeover/restore against the real Cinnamon settings schemas.
+- Not yet run on a real Linux Mint desktop. Please report anything odd.

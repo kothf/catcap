@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.kothf.CatCap</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>CatCap</name>
+  <summary>Capture, annotate and organise screenshots</summary>
+  <description>
+    <p>CatCap captures regions, windows or the whole screen, lets you annotate them with
+    arrows, text, callouts, numbered steps, blur and more, and keeps every capture in a
+    searchable library with tags and collections. Works on X11 and Wayland.</p>
+  </description>
+  <launchable type="desktop-id">io.github.kothf.CatCap.desktop</launchable>
+  <url type="homepage">https://github.com/kothf/catcap</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-11-24"/>
+  </releases>
+</component>
