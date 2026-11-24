@@ -283,6 +283,34 @@ class RenderTests(TempHome):
         out = render.render(src, doc)
         self.assertEqual((out.width(), out.height()), (50, 100))
 
+    def test_screen_grabs_fill_the_snapshot_at_fractional_scaling(self):
+        from PyQt6.QtCore import QRect
+
+        from catcap.capture.x11 import compose_screens
+
+        # One 2560x1440 monitor at 120 dpi: Qt sees 2048x1152 logical px at a ratio of 1.25.
+        grab = self.pixbuf(2560, 1440, "#ff0000")
+        grab.setDevicePixelRatio(1.25)
+        image, monitors = compose_screens([("DP-0", QRect(0, 0, 2048, 1152), grab)], QRect(0, 0, 2048, 1152), 1.25)
+        self.assertEqual((image.width(), image.height()), (2560, 1440))
+        self.assertEqual(image.pixelColor(2559, 1439).name(), "#ff0000")
+        self.assertEqual(monitors, [("DP-0", 0, 0, 2560, 1440)])
+
+    def test_mixed_scale_screens_are_resampled_into_their_slots(self):
+        from PyQt6.QtCore import QRect
+
+        from catcap.capture.x11 import compose_screens
+
+        left = self.pixbuf(2000, 1000, "#00ff00")     # 1000x500 logical at 2.0
+        left.setDevicePixelRatio(2.0)
+        right = self.pixbuf(1000, 500, "#0000ff")     # 1000x500 logical at 1.0
+        image, monitors = compose_screens([("A", QRect(0, 0, 1000, 500), left), ("B", QRect(1000, 0, 1000, 500), right)],
+                                          QRect(0, 0, 2000, 500), 2.0)
+        self.assertEqual((image.width(), image.height()), (4000, 1000))
+        self.assertEqual(image.pixelColor(1999, 999).name(), "#00ff00")
+        self.assertEqual(image.pixelColor(3999, 999).name(), "#0000ff")
+        self.assertEqual(monitors[1], ("B", 2000, 0, 2000, 1000))
+
     def test_temp_renders_with_the_same_name_do_not_collide(self):
         from catcap import ui
         from catcap.config import Config
