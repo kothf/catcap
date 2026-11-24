@@ -1,4 +1,4 @@
-# Implementation status (v0.2.1)
+# Implementation status (v0.2.2)
 
 v0.2.0 moved the interface from GTK 3 to Qt 6 (PyQt6) with CatCap's own design; v0.2.1 made CatCap tray-first.
 Since then: safer library rebuild and move, a solid Redact tool, a more responsive library and export,

@@ -42,7 +42,7 @@ then installs PyQt6 with pip for your user.
 
 ```bash
 ./packaging/build-deb.sh                          # creates dist/catcap_<version>_all.deb
-sudo apt install ./dist/catcap_0.2.1_all.deb      # then start “CatCap” from the Mint menu
+sudo apt install ./dist/catcap_0.2.2_all.deb      # then start “CatCap” from the Mint menu
 ```
 
 GitHub Actions also builds the package on every push (download it from the run's
