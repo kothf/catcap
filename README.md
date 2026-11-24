@@ -61,16 +61,27 @@ Uninstall with `sudo apt remove catcap`. Your captures stay in `~/Pictures/CatCa
 | Settings | `~/.config/catcap/config.toml` |
 
 Edited images are rendered on demand when you copy, export or drag them; they are not stored.
+The PNGs in the image folder are always the untouched originals, so blurred or redacted areas are
+still visible in them: share captures by copying, dragging or exporting them from CatCap.
+
+**Rebuild library from disk** (library menu) re-adds PNGs that are missing from the database. Captures
+whose file can't be found are kept unless you confirm removing them, so a library on an unplugged
+drive doesn't lose its tags and notes.
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v                 # core tests
+python3 -m unittest discover -s tests -v                 # core and offscreen GUI tests
 dbus-run-session -- python3 -m unittest discover -s tests  # also runs the Wayland portal tests
+pipx run ruff check catcap tests                         # lint (CI runs this too)
 ```
 
+The library database carries a schema version. When you change `SCHEMA` in `library.py`, bump
+`SCHEMA_VERSION` and add the upgrade statements to `MIGRATIONS` so existing libraries are upgraded.
+
 Built with Python 3 and Qt 6 (PyQt6). Code layout: `catcap/capture/` (X11 and portal backends),
-`overlay.py` (region selection), `editor.py`, `library_window.py`, `library.py` (SQLite),
+`overlay.py` (region selection), `editor.py` (+ `editor_tools.py`, `editor_widgets.py`),
+`library_window.py` (+ `library_views.py`), `library.py` (SQLite),
 `annotations.py` + `render.py` (non-destructive editing), `theme.py` (palette, stylesheet, icons),
 `hotkeys.py`, `tray.py`, `app.py` (CLI and workflow).
 
