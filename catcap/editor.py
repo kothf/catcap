@@ -31,6 +31,7 @@ TOOLS = [
     ("step", "Numbered step", "S"),
     ("blur", "Blur", "B"),
     ("pixelate", "Pixelate", "X"),
+    ("redact", "Redact (solid box)", "K"),
     ("spotlight", "Spotlight", "G"),
     ("crop", "Crop", "C"),
 ]
@@ -48,6 +49,7 @@ DEFAULT_STYLES = {
     "step": {"color": "#e53935", "size": 34, "style": "number"},
     "blur": {"strength": 12},
     "pixelate": {"strength": 12},
+    "redact": {"color": "#000000"},
     "spotlight": {"dim": 0.55},
 }
 PROPS_FOR = {
@@ -62,6 +64,7 @@ PROPS_FOR = {
     "step": ["color", "size", "style", "opacity"],
     "blur": ["strength"],
     "pixelate": ["strength"],
+    "redact": ["color"],
     "spotlight": [],
     "select": [],
     "crop": ["aspect"],
@@ -78,7 +81,9 @@ HINTS = {
     "pen": "Drag to draw freehand.",
     "step": "Click to place the next number.",
     "blur": "Drag over anything private.",
-    "pixelate": "Drag over anything private.",
+    "pixelate": "Drag over anything private. For passwords and other text, Redact is safer: "
+                "pixelated text can sometimes be guessed back.",
+    "redact": "Drag over anything private. The area is covered with a solid box in the exported image.",
     "spotlight": "Drag the areas to keep bright; the rest is dimmed.",
     "crop": "Drag to choose the area. Enter applies, Esc cancels.",
 }

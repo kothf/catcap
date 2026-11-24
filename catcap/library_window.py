@@ -1036,8 +1036,25 @@ class LibraryWindow(QMainWindow):
             self.library.empty_trash()
 
     def rebuild(self):
-        added = self.library.rebuild()
-        self.info.setText(f"Library rebuilt: {added} capture(s) recovered from disk.")
+        try:
+            added, missing = self.library.rebuild()
+        except OSError as exc:
+            ui.error(self, "Couldn't rebuild the library",
+                     f"{exc}. If it is on an external drive, connect the drive and try again.")
+            return
+        text = f"Library rebuilt: {added} capture(s) recovered from disk."
+        if missing:
+            n = len(missing)
+            if ui.ask(self, f"{n} capture{'s are' if n != 1 else ' is'} missing from disk",
+                      f"The image file of {n} capture{'s' if n != 1 else ''} wasn't found in "
+                      f"{self.library.images_dir}. If the folder is on a drive that isn't connected, "
+                      "keep them: they come back when the drive does.\n\nRemove them from the library? "
+                      "Their names, tags, notes and collections are lost.", "Remove from library", True):
+                self.library.forget(missing)
+                text += f" Removed {n} missing capture(s)."
+            else:
+                text += f" Kept {n} capture(s) whose files are missing."
+        self.info.setText(text)
 
     def new_collection(self, add_selected=False):
         name = ui.prompt_text(self, "New collection", "Name:")

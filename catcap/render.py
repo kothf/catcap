@@ -267,6 +267,15 @@ def _apply_effect(image: QImage, item: dict) -> None:
     w, h = x1 - x0, y1 - y0
     if w < 1 or h < 1:
         return
+    if item["type"] == "redact":
+        # Solid and fully opaque whatever the opacity setting, so nothing underneath survives.
+        p = QPainter(image)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        color = parse_color(item.get("color", "#000000"))
+        color.setAlpha(255)
+        p.fillRect(x0, y0, w, h, color)
+        p.end()
+        return
     strength = max(2, int(item.get("strength", 12)))
     region = image.copy(x0, y0, w, h)
     if item["type"] == "pixelate":

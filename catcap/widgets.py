@@ -224,8 +224,8 @@ SHORTCUTS = [
         ("F, Ctrl+A", "Select the whole screen"), ("C", "Copy the colour under the pointer"),
         ("M", "Show or hide the magnifier"), ("Esc, right-click", "Cancel")]),
     ("Editor", [
-        ("V A L R E T O H P S B X G C", "Select, arrow, line, rectangle, ellipse, text, callout, highlighter, "
-                                        "pen, step, blur, pixelate, spotlight, crop"),
+        ("V A L R E T O H P S B X K G C", "Select, arrow, line, rectangle, ellipse, text, callout, highlighter, "
+                                          "pen, step, blur, pixelate, redact, spotlight, crop"),
         ("Ctrl+Z, Ctrl+Shift+Z", "Undo, redo"), ("Delete", "Delete the selected annotation"),
         ("Ctrl+D", "Duplicate"), ("Ctrl+], Ctrl+[", "Bring to front, send to back"),
         ("Shift while drawing", "45° lines, squares, circles"), ("Ctrl+C", "Copy the image"),

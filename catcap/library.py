@@ -474,8 +474,16 @@ class Library:
         return image_size(self.original_path(capture_id))
 
     # ------------------------------------------------------------------ maintenance
-    def rebuild(self) -> int:
-        """Re-add originals found on disk that are missing from the database (LIB-05)."""
+    def rebuild(self) -> tuple[int, list[str]]:
+        """Re-add originals found on disk that are missing from the database (LIB-05).
+
+        Returns (number added, ids of captures whose original file is missing). Missing captures
+        are only reported, never removed here: the image folder may sit on a drive that is not
+        mounted, and dropping the rows would lose names, tags, notes and collections for good.
+        Call forget() for the ids the user really wants gone.
+        """
+        if not self.images_dir.is_dir():
+            raise FileNotFoundError(f"the image folder {self.images_dir} is not available")
         known = {r[0] for r in self.db.execute("SELECT path FROM captures")}
         added = 0
         for png in sorted(self.images_dir.rglob("*.png")):
@@ -493,20 +501,69 @@ class Library:
                 (cid, png.stem, created, created, "recovered", w, h, png.stat().st_size, rel),
             )
             added += 1
-        missing = [r[0] for r in self.db.execute("SELECT id, path FROM captures")
-                   if not (self.images_dir / r[1]).exists()]
-        for cid in missing:
-            self.db.execute("DELETE FROM captures WHERE id=?", (cid,))
         self.db.commit()
         self._emit("rebuilt")
-        return added
+        return added, self.missing()
+
+    def missing(self) -> list[str]:
+        """Ids of captures whose original PNG is not on disk."""
+        return [r[0] for r in self.db.execute("SELECT id, path FROM captures")
+                if not (self.images_dir / r[1]).exists()]
+
+    def forget(self, ids: list[str]) -> None:
+        """Remove captures from the database only (their files are already gone)."""
+        self.db.executemany("DELETE FROM captures WHERE id=?", [(i,) for i in ids])
+        self.db.commit()
+        for cid in ids:
+            try:
+                self.thumb_path(cid).unlink()
+            except FileNotFoundError:
+                pass
+        self._emit("deleted", ids)
 
     def move_images(self, new_dir: Path) -> None:
-        """Move the image store to a new folder (LIB-06)."""
-        new_dir = Path(new_dir)
+        """Move the image store to a new folder (LIB-06).
+
+        Files are moved one by one and merged into folders that already exist, so a target that
+        already has a 2026/ folder does not end up with 2026/2026/. Nothing is overwritten. If a
+        file cannot be moved, everything moved so far goes back and the library stays where it was.
+        """
+        old_dir = self.images_dir.resolve()
+        new_dir = Path(new_dir).expanduser().resolve()
+        if new_dir == old_dir:
+            return
+        if new_dir.is_relative_to(old_dir):
+            raise ValueError("the new folder is inside the current image folder")
+        if old_dir.is_relative_to(new_dir):
+            raise ValueError("the current image folder is inside the new folder")
+        files = [f for f in sorted(old_dir.rglob("*")) if f.is_file() or f.is_symlink()]
+        clashes = [f.relative_to(old_dir).as_posix() for f in files if (new_dir / f.relative_to(old_dir)).exists()]
+        if clashes:
+            more = f" and {len(clashes) - 5} more" if len(clashes) > 5 else ""
+            raise FileExistsError("these files already exist in the new folder: "
+                                  + ", ".join(clashes[:5]) + more)
         paths.ensure_dir(new_dir)
-        for item in self.images_dir.iterdir():
-            shutil.move(str(item), str(new_dir / item.name))
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for src in files:
+                dst = new_dir / src.relative_to(old_dir)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                moved.append((src, dst))
+        except OSError:
+            for src, dst in reversed(moved):
+                try:
+                    src.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(dst), str(src))
+                except OSError as exc:
+                    print(f"catcap: could not move {dst} back: {exc}")
+            raise
+        # Remove the now empty folders of the old store (keep the old root itself).
+        for d in sorted((d for d in old_dir.rglob("*") if d.is_dir()), key=lambda d: len(d.parts), reverse=True):
+            try:
+                d.rmdir()
+            except OSError:
+                pass
         self.images_dir = new_dir
         self._emit("moved")
 

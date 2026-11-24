@@ -63,7 +63,10 @@ def copy_capture(library, capture_id: str) -> None:
 def temp_render(library, capture_id: str, config) -> Path:
     """Render to $XDG_RUNTIME_DIR/catcap for drag-and-drop / open-with / email."""
     cap = library.get(capture_id)
-    out = paths.runtime_dir() / f"{format_filename(config.get('output', 'filename_template'), cap)}.png"
+    # One folder per capture: the file keeps the friendly template name for the drop target, and
+    # two captures whose names come out the same (same app, same second) can't overwrite each other.
+    folder = paths.ensure_dir(paths.runtime_dir() / "render" / capture_id)
+    out = folder / f"{format_filename(config.get('output', 'filename_template'), cap)}.png"
     render.save_image(render.render_capture(library, capture_id), out, "png")
     return out
 
@@ -77,11 +80,23 @@ def drag_mime(library, ids, config, with_ids: bool = True) -> QMimeData:
 
 
 def cleanup_temp(max_age: float = 3600) -> None:
+    """Delete rendered temp files older than max_age (the instance socket is left alone)."""
     now = time.time()
+    root = paths.runtime_dir()
     try:
-        for f in paths.runtime_dir().iterdir():
-            if now - f.stat().st_mtime > max_age:
+        for f in root.iterdir():   # files from older versions that rendered straight into root
+            if f.suffix == ".png" and f.is_file() and now - f.stat().st_mtime > max_age:
                 f.unlink()
+        render_dir = root / "render"
+        if render_dir.is_dir():
+            for folder in render_dir.iterdir():
+                for f in folder.iterdir():
+                    if now - f.stat().st_mtime > max_age:
+                        f.unlink()
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
     except OSError:
         pass
 

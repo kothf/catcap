@@ -19,11 +19,11 @@ from dataclasses import dataclass, field
 DOC_VERSION = 1
 
 LINE_KINDS = {"arrow", "line"}
-RECT_KINDS = {"rect", "ellipse", "blur", "pixelate", "spotlight"}
+RECT_KINDS = {"rect", "ellipse", "blur", "pixelate", "redact", "spotlight"}
 PATH_KINDS = {"pen", "highlighter"}
 BOX_KINDS = {"text", "callout"}
 POINT_KINDS = {"step"}
-EFFECT_KINDS = {"blur", "pixelate"}
+EFFECT_KINDS = {"blur", "pixelate", "redact"}
 ALL_KINDS = LINE_KINDS | RECT_KINDS | PATH_KINDS | BOX_KINDS | POINT_KINDS
 
 LENGTH_KEYS = ("width", "size", "font_size", "strength", "radius")

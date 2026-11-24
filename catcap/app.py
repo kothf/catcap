@@ -46,6 +46,10 @@ class CatCap:
         except Exception as exc:
             print(f"catcap: trash purge failed: {exc}")
         ui.cleanup_temp()
+        # The tray process can run for weeks: keep clearing old drag/open-with renders.
+        self._cleanup_timer = QTimer(interval=3600 * 1000)
+        self._cleanup_timer.timeout.connect(ui.cleanup_temp)
+        self._cleanup_timer.start()
         self.backend = get_backend()
         from .hotkeys import HotkeyManager
 
