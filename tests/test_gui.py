@@ -120,6 +120,8 @@ class AboutTests(AppTestCase):
             self.app.show_about()
         text = about.call_args.args[2]
         self.assertIn("Created by", text)
+        self.assertIn("Andrey Dumchin", text)
+        self.assertIn("4X5VA", text)
         self.assertIn("Credits", text)
         for name, _what, _url in CREDITS:
             self.assertIn(name, text)

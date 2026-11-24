@@ -94,7 +94,7 @@ To give Print Screen back to Cinnamon (for example before uninstalling), run `ca
 
 ## Credits
 
-Created by [Andrey](https://github.com/kothf). Built on Qt 6 and PyQt6, python-xlib, xdg-desktop-portal
+Created by [Andrey Dumchin](https://github.com/kothf), 4X5VA. Built on Qt 6 and PyQt6, python-xlib, xdg-desktop-portal
 and SQLite, with development help from [Claude Code](https://claude.com/claude-code) by Anthropic.
 The same credits are shown in the app under **About CatCap**.
 
