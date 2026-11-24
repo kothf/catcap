@@ -7,6 +7,8 @@ import os
 import shutil
 import subprocess
 import sys
+import traceback
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
@@ -76,6 +78,12 @@ class CatCap:
         self._cleanup_timer = QTimer(interval=3600 * 1000)
         self._cleanup_timer.timeout.connect(ui.cleanup_temp)
         self._cleanup_timer.start()
+        # A package upgrade swaps the code under the running tray process; restart into it.
+        self._code = self._code_stamp()
+        self._new_code = None
+        self._upgrade_timer = QTimer(interval=15 * 1000)
+        self._upgrade_timer.timeout.connect(self._check_upgrade)
+        self._upgrade_timer.start()
         self.backend = get_backend()
         from .hotkeys import HotkeyManager
 
@@ -104,6 +112,46 @@ class CatCap:
 
     def quit(self):
         self.qapp.quit()
+
+    # ================================================================ upgrades
+    @staticmethod
+    def _code_stamp():
+        try:
+            st = Path(__file__).with_name("__init__.py").stat()
+        except OSError:
+            return None
+        return st.st_ino, st.st_mtime_ns
+
+    def _busy(self) -> bool:
+        return self._capturing or any(w.isVisible() for w in QApplication.topLevelWidgets())
+
+    def _check_upgrade(self):
+        """Restart once the installed code has changed and stayed unchanged for one tick.
+
+        Without this, the old process keeps running after `apt install` and later imports
+        modules from the new version (for example opening About), which can kill it.
+        """
+        stamp = self._code_stamp()
+        if stamp is None or stamp == self._code:
+            self._new_code = None
+            return
+        if stamp != self._new_code:   # still being installed, or just noticed: wait one tick
+            self._new_code = stamp
+            return
+        if not self._busy():          # never close a window the user is working in
+            self.restart()
+
+    def restart(self):
+        from .cli import socket_path
+
+        root = str(Path(__file__).resolve().parent.parent)
+        code = f"import sys; sys.path.insert(0, {root!r}); from catcap.cli import main; sys.exit(main())"
+        if self.tray is not None:
+            self.tray.icon.hide()
+        QLocalServer.removeServer(socket_path())
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, [sys.executable, "-c", code, "--background"])
 
     # ================================================================ command handling
     def handle(self, args: dict, cwd: str):
@@ -432,9 +480,30 @@ class CatCap:
             ui.error(self.library_window, "Hotkeys need attention", "\n".join(warnings))
 
 
+def install_excepthook():
+    """Log uncaught errors instead of letting PyQt abort the tray process."""
+    log = paths.cache_dir() / "catcap.log"
+
+    def hook(exc_type, exc, tb):
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        sys.stderr.write(text)
+        try:
+            paths.ensure_dir(log.parent)
+            if log.exists() and log.stat().st_size > 1_000_000:
+                log.replace(log.with_suffix(".log.old"))
+            with open(log, "a", encoding="utf-8") as f:
+                f.write(f"--- {datetime.now().isoformat(timespec='seconds')} CatCap {__version__}\n{text}")
+        except OSError:
+            pass
+
+    sys.excepthook = hook
+
+
 def run(args) -> int:
     """Start the CatCap instance (tray process) and handle the first command."""
     from .cli import socket_path
+
+    install_excepthook()
 
     QApplication.setApplicationName(APP_NAME)
     QApplication.setDesktopFileName(APP_ID)

@@ -127,6 +127,59 @@ class AboutTests(AppTestCase):
             self.assertIn(name, text)
 
 
+class UpgradeTests(AppTestCase):
+    """After `apt install` of a new version the tray process restarts into the new code."""
+
+    def test_restarts_once_new_code_is_stable_and_idle(self):
+        old = self.app._code
+        new = (old[0] + 1, old[1]) if old else (1, 1)
+        with mock.patch.object(type(self.app), "_code_stamp", return_value=new), \
+                mock.patch.object(self.app, "restart") as restart:
+            self.app._check_upgrade()          # first sight: maybe still unpacking
+            restart.assert_not_called()
+            self.app._check_upgrade()          # unchanged for a tick: restart
+            restart.assert_called_once()
+
+    def test_waits_while_a_window_is_open(self):
+        old = self.app._code
+        new = (old[0] + 1, old[1]) if old else (1, 1)
+        self.app.show_library()
+        spin(50)
+        with mock.patch.object(type(self.app), "_code_stamp", return_value=new), \
+                mock.patch.object(self.app, "restart") as restart:
+            self.app._check_upgrade()
+            self.app._check_upgrade()
+            restart.assert_not_called()
+            for w in QApplication.topLevelWidgets():
+                w.hide()
+            self.app._check_upgrade()
+            restart.assert_called_once()
+
+    def test_unchanged_code_never_restarts(self):
+        with mock.patch.object(self.app, "restart") as restart:
+            for _ in range(3):
+                self.app._check_upgrade()
+        restart.assert_not_called()
+
+
+class ExceptHookTests(AppTestCase):
+    def test_uncaught_error_is_logged_not_fatal(self):
+        from catcap import app as app_mod
+
+        saved = sys.excepthook
+        try:
+            app_mod.install_excepthook()
+            try:
+                raise ImportError("cannot import name 'AUTHOR'")
+            except ImportError:
+                with mock.patch.object(sys, "stderr"):
+                    sys.excepthook(*sys.exc_info())
+        finally:
+            sys.excepthook = saved
+        log = Path(os.environ["XDG_CACHE_HOME"]) / "catcap" / "catcap.log"
+        self.assertIn("cannot import name 'AUTHOR'", log.read_text())
+
+
 class LibraryWindowTests(AppTestCase):
     def test_rebuild_asks_before_forgetting_missing_captures(self):
         from catcap import ui

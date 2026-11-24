@@ -64,7 +64,7 @@ Or build it yourself from this folder:
 
 ```bash
 ./packaging/build-deb.sh                          # creates dist/catcap_<version>_all.deb
-sudo apt install ./dist/catcap_0.2.4_all.deb      # then start “CatCap” from the app menu
+sudo apt install ./dist/catcap_0.2.5_all.deb      # then start “CatCap” from the app menu
 ```
 
 GitHub Actions also builds the package on every push (download it from the run's
