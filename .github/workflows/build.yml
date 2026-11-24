@@ -1,0 +1,46 @@
+name: Test and build .deb
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04   # same base as Linux Mint 22 (Python 3.12, Qt 6.4)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pyqt6 python3-pyqt6.qtsvg python3-xlib qt6-image-formats-plugins \
+            python3-gi gir1.2-glib-2.0 libglib2.0-bin cinnamon-desktop-data dbus dpkg-dev
+
+      - name: Unit tests
+        run: dbus-run-session -- /usr/bin/python3 -m unittest discover -s tests -v
+        env:
+          QT_QPA_PLATFORM: offscreen
+
+      - name: Build package
+        run: ./packaging/build-deb.sh
+
+      - name: Install package
+        run: |
+          sudo apt-get install -y ./dist/catcap_*_all.deb
+          catcap --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: catcap-deb
+          path: dist/*.deb
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb

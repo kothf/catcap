@@ -3,8 +3,8 @@
 | Item | Value |
 |---|---|
 | Product | CatCap — screenshot capture, annotation and library app |
-| Target platform | Linux Mint 21.x / 22.x (Cinnamon edition first; MATE and Xfce best-effort) |
-| Document version | 0.2 (draft) |
+| Target platform | Linux Mint 22.x and newer (Cinnamon edition first; MATE and Xfce best-effort). Mint 21.x works from source with PyQt6 from pip. |
+| Document version | 0.3 (draft) |
 | Date | 2026-11-24 |
 | Status | For review — open questions resolved (see §12) |
 
@@ -64,10 +64,10 @@ CatCap is a standalone native desktop app. It runs as a **tray/background proces
 - Multi-monitor setups with mixed DPI and scaling (100%, 125%, 150%, 200%).
 
 ### 2.4 Design and implementation constraints
-- Must integrate with the Cinnamon panel tray (XApp StatusIcon / AppIndicator).
+- Must integrate with the Cinnamon panel tray (StatusNotifierItem / XEmbed).
 - Must follow freedesktop.org standards: XDG base directories, `.desktop` file, icon theme, MIME types.
 - Must work offline. No telemetry by default.
-- Technology stack (decided): **Python 3 + GTK 3 (PyGObject)** to match the Mint/XApp look-and-feel, with **SQLite** for the library and **Pillow/Cairo** for imaging. Wayland capture uses the `xdg-desktop-portal` D-Bus API (via `Gio.DBusProxy` or `dbus-next`).
+- Technology stack (decided, revised in 0.3): **Python 3 + Qt 6 (PyQt6)** with CatCap's own visual design (light and dark), **SQLite** for the library and **QPainter** for imaging. X11 window detection uses `python-xlib`; Wayland capture uses the `xdg-desktop-portal` D-Bus API through Qt D-Bus. Global hotkeys are written to Cinnamon's settings with the `gsettings` tool.
 - Licence: **MIT**.
 
 ### 2.5 Assumptions and dependencies
@@ -392,7 +392,7 @@ CatCap is a standalone native desktop app. It runs as a **tray/background proces
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Technology stack | **Python 3 + GTK 3 (PyGObject)**. |
+| 1 | Technology stack | **Python 3 + Qt 6 (PyQt6)**, chosen in 0.3 for a modern custom look (first build used GTK 3). |
 | 2 | Store rendered PNGs next to originals? | **No.** Render on demand only (LIB-03, NFR-P6). |
 | 3 | Wayland in v1? | **Yes.** v1.0 runs on both X11 and Wayland (§2.3, §8.3). |
 | 4 | Licence | **MIT**. |

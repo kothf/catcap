@@ -1,0 +1,20 @@
+#!/usr/bin/python3
+"""Run CatCap straight from this folder (no install needed).
+
+    ./run-catcap              open the library (and start the tray icon)
+    ./run-catcap --region     capture a region
+    ./run-catcap --help       all options
+
+Missing libraries? Run ./install-deps.sh once.
+"""
+
+import os
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+os.environ.setdefault("CATCAP_LAUNCHER", os.path.join(HERE, "run-catcap"))
+
+from catcap.cli import main  # noqa: E402
+
+sys.exit(main())

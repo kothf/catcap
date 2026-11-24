@@ -1,0 +1,31 @@
+[Desktop Entry]
+Type=Application
+Name=CatCap
+GenericName=Screenshot Tool
+Comment=Capture, annotate and organise screenshots
+Exec=catcap %F
+Icon=io.github.kothf.CatCap
+Terminal=false
+Categories=Graphics;Utility;GTK;
+Keywords=screenshot;capture;snip;annotate;print screen;
+MimeType=image/png;image/jpeg;image/webp;image/bmp;
+StartupNotify=true
+StartupWMClass=io.github.kothf.CatCap
+DBusActivatable=false
+Actions=Region;Window;FullScreen;Library;
+
+[Desktop Action Region]
+Name=Capture Region or Window
+Exec=catcap --region
+
+[Desktop Action Window]
+Name=Capture Window
+Exec=catcap --window
+
+[Desktop Action FullScreen]
+Name=Capture Full Screen
+Exec=catcap --full
+
+[Desktop Action Library]
+Name=Open Library
+Exec=catcap --library
