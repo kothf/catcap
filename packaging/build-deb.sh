@@ -46,6 +46,7 @@ install -m 0644 "$ROOT/data/icons/hicolor/symbolic/apps/io.github.kothf.CatCap-s
 } > "$STAGE/usr/share/doc/catcap/copyright"
 printf 'catcap (%s) unstable; urgency=low\n\n  * Release %s.\n\n -- CatCap contributors <noreply@github.com>  %s\n' \
     "$VERSION" "$VERSION" "$(date -R)" | gzip -9n > "$STAGE/usr/share/doc/catcap/changelog.gz"
+chmod 0644 "$STAGE/usr/share/doc/catcap/copyright" "$STAGE/usr/share/doc/catcap/changelog.gz"   # independent of umask
 
 SIZE="$(du -sk "$STAGE/usr" | cut -f1)"
 cat > "$STAGE/DEBIAN/control" <<CONTROL
