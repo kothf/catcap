@@ -395,7 +395,7 @@ class CatCap:
 
         credits = "".join(f"<li><a href='{url}'>{name}</a>: {what}</li>" for name, what, url in CREDITS)
         QMessageBox.about(parent, "About CatCap",
-                          f"<h3>CatCap {__version__}</h3><p>Capture, annotate and organise screenshots on Linux Mint.</p>"
+                          f"<h3>CatCap {__version__}</h3><p>Capture, annotate and organise screenshots on Linux.</p>"
                           f"<p>Created by <a href='{AUTHOR_URL}'>{AUTHOR}</a>, {AUTHOR_CALLSIGN}.</p>"
                           f"<p><b>Credits</b></p><ul>{credits}</ul>"
                           "<p>MIT licence · <a href='https://github.com/kothf/catcap'>github.com/kothf/catcap</a></p>")

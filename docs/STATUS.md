@@ -82,4 +82,4 @@ Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 - Unit tests: config, library, annotations, rendering/export, filename templates, hotkey parsing, Cinnamon hotkey takeover/restore against the real schemas, the Wayland portal flow against a mock `xdg-desktop-portal`, library rebuild/move safety, schema migrations, and
   offscreen GUI smoke tests (editor tools and autosave, library window, export, drag data, overlay, CLI forwarding).
 - GUI runs under Xvfb + Openbox: full/active/region capture, overlay, quick toolbar, editor tools, crop, library grid/list/preview, settings.
-- Not yet run on a real Linux Mint desktop. Please report anything odd.
+- Run on a real Linux Mint (Cinnamon, X11, 125% scaling) desktop; other desktops not yet tested. Please report anything odd.
