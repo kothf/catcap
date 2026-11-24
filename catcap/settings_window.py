@@ -203,6 +203,9 @@ class SettingsWindow(QDialog):
         self._note(form, "Set to 0 to keep items in the trash until you empty it.")
         self._note(form, "Each original is kept as a PNG with a small .json file next to it that holds your edits. "
                          "Edited images are rendered when you copy, export or drag them, so they don't take extra space.")
+        self._note(form, "The PNG files in this folder are always the untouched originals, so anything you "
+                         "blurred or redacted is still visible in them. To share a capture, copy, drag or export "
+                         "it from CatCap instead of sending the file from this folder.")
         return w
 
     def _move_library(self):

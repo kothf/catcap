@@ -1,0 +1,32 @@
+[project]
+name = "catcap"
+dynamic = ["version"]
+description = "Screenshot capture, annotation and library app for Linux Mint"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["PyQt6>=6.2", "python-xlib"]
+
+[project.scripts]
+catcap = "catcap.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "catcap.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["catcap*"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "SIM"]
+ignore = [
+    "SIM105",  # contextlib.suppress is not clearer than try/except/pass here
+    "SIM108",  # ternaries everywhere hurt readability
+    "UP037",   # quoted annotations are harmless with `from __future__ import annotations`
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]

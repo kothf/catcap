@@ -6,9 +6,9 @@ import copy
 import json
 import math
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QDrag, QImage, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
-from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
+from PyQt6.QtGui import QImage, QKeySequence, QShortcut
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                              QFontDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu,
                              QPushButton, QScrollArea, QSlider, QSpinBox, QToolButton, QVBoxLayout,
                              QWidget)
@@ -16,257 +16,12 @@ from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox, Q
 from . import annotations as ann
 from . import render, ui
 from .annotations import Document
-from .theme import ACCENT, CANVAS, draw_brackets
-
-TOOLS = [
-    ("select", "Select and move", "V"),
-    ("arrow", "Arrow", "A"),
-    ("line", "Line", "L"),
-    ("rect", "Rectangle", "R"),
-    ("ellipse", "Ellipse", "E"),
-    ("text", "Text", "T"),
-    ("callout", "Callout", "O"),
-    ("highlighter", "Highlighter", "H"),
-    ("pen", "Pen", "P"),
-    ("step", "Numbered step", "S"),
-    ("blur", "Blur", "B"),
-    ("pixelate", "Pixelate", "X"),
-    ("spotlight", "Spotlight", "G"),
-    ("crop", "Crop", "C"),
-]
-GROUP_BREAKS = {"select", "callout", "step", "spotlight"}
-
-DEFAULT_STYLES = {
-    "arrow": {"color": "#e53935", "width": 5, "shadow": True},
-    "line": {"color": "#e53935", "width": 4, "dashed": False},
-    "rect": {"color": "#e53935", "width": 4, "fill": False, "radius": 4},
-    "ellipse": {"color": "#e53935", "width": 4, "fill": False},
-    "text": {"color": "#e53935", "font": "Sans Bold", "font_size": 22, "bg": False},
-    "callout": {"color": "#e53935", "font": "Sans Bold", "font_size": 20, "width": 3, "bg_color": "#ffffff"},
-    "highlighter": {"color": "#ffeb3b", "width": 20},
-    "pen": {"color": "#e53935", "width": 4},
-    "step": {"color": "#e53935", "size": 34, "style": "number"},
-    "blur": {"strength": 12},
-    "pixelate": {"strength": 12},
-    "spotlight": {"dim": 0.55},
-}
-PROPS_FOR = {
-    "arrow": ["color", "width", "shadow", "opacity"],
-    "line": ["color", "width", "dashed", "shadow", "opacity"],
-    "rect": ["color", "width", "fill", "shadow", "opacity"],
-    "ellipse": ["color", "width", "fill", "shadow", "opacity"],
-    "text": ["color", "font", "bg", "shadow", "opacity"],
-    "callout": ["color", "font", "opacity"],
-    "highlighter": ["color", "width"],
-    "pen": ["color", "width", "shadow", "opacity"],
-    "step": ["color", "size", "style", "opacity"],
-    "blur": ["strength"],
-    "pixelate": ["strength"],
-    "spotlight": [],
-    "select": [],
-    "crop": ["aspect"],
-}
-HINTS = {
-    "select": "Click an annotation to select it. Drag to move, Delete removes it, double-click edits text.",
-    "arrow": "Drag to draw. Hold Shift for 45° steps.",
-    "line": "Drag to draw. Hold Shift for 45° steps.",
-    "rect": "Drag to draw. Hold Shift for a square.",
-    "ellipse": "Drag to draw. Hold Shift for a circle.",
-    "text": "Click where the text should start.",
-    "callout": "Drag from the point of interest to where the bubble goes.",
-    "highlighter": "Drag across what you want to highlight.",
-    "pen": "Drag to draw freehand.",
-    "step": "Click to place the next number.",
-    "blur": "Drag over anything private.",
-    "pixelate": "Drag over anything private.",
-    "spotlight": "Drag the areas to keep bright; the rest is dimmed.",
-    "crop": "Drag to choose the area. Enter applies, Esc cancels.",
-}
-SWATCHES = ["#e53935", "#fb8c00", "#fdd835", "#43a047", "#1e88e5", "#8e24aa", "#212121", "#ffffff"]
-ASPECTS = [("Free", None), ("1:1", 1.0), ("4:3", 4 / 3), ("3:2", 3 / 2), ("16:9", 16 / 9), ("9:16", 9 / 16)]
-BAR_ICON = "#E9ECEA"
+from .editor_tools import (ASPECTS, BAR_ICON, DEFAULT_STYLES, GROUP_BREAKS, HINTS, PROPS_FOR,  # noqa: F401
+                           SWATCHES, TOOLS)
+from .editor_widgets import Canvas, ColorButton, DragHandle  # noqa: F401
+from .theme import CANVAS
 
 
-# ====================================================================== canvas
-class Canvas(QWidget):
-    cursorMoved = pyqtSignal(float, float)
-
-    def __init__(self, editor: "Editor"):
-        super().__init__()
-        self.ed = editor
-        self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAutoFillBackground(False)
-
-    # coordinate mapping ----------------------------------------------
-    def origin(self) -> QPointF:
-        _cx, _cy, w, h = self.ed.view_rect()
-        z = self.ed.zoom
-        return QPointF(max(24.0, (self.width() - w * z) / 2), max(24.0, (self.height() - h * z) / 2))
-
-    def to_doc(self, pos) -> tuple[float, float]:
-        cx, cy, _w, _h = self.ed.view_rect()
-        o = self.origin()
-        return (pos.x() - o.x()) / self.ed.zoom + cx, (pos.y() - o.y()) / self.ed.zoom + cy
-
-    def sizeHint(self):
-        if self.ed.base is None:
-            return QSize(200, 200)
-        _cx, _cy, w, h = self.ed.view_rect()
-        return QSize(int(w * self.ed.zoom) + 48, int(h * self.ed.zoom) + 48)
-
-    # painting ----------------------------------------------------------
-    def paintEvent(self, _ev):
-        ed = self.ed
-        p = QPainter(self)
-        p.fillRect(self.rect(), QColor(CANVAS))
-        if ed.rendered is None:
-            return
-        cx, cy, w, h = ed.view_rect()
-        o = self.origin()
-        z = ed.zoom
-        frame = QRectF(o.x(), o.y(), w * z, h * z)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        for i, alpha in enumerate((40, 26, 14)):      # soft drop shadow under the image
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(0, 0, 0, alpha))
-            p.drawRoundedRect(frame.adjusted(-2 - i * 2, 0 - i, 2 + i * 2, 6 + i * 3), 4 + i, 4 + i)
-        p.save()
-        p.translate(o)
-        p.scale(z, z)
-        p.translate(-cx, -cy)
-        p.setClipRect(QRectF(cx, cy, w, h))
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, z < 2)
-        p.drawImage(0, 0, ed.rendered)
-        if ed.active is not None:
-            kind = ed.active["type"]
-            if kind in ann.EFFECT_KINDS or kind == "spotlight":
-                self._dashed(p, QRectF(*ann.bbox(ed.active)))
-            else:
-                render.draw_item(p, ed.active)
-        p.setClipping(False)
-        if ed.selected is not None and ed.tool == "select":
-            x, y, bw, bh = ann.bbox(ed.selected)
-            pad = 6 / z
-            draw_brackets(p, QRectF(x - pad, y - pad, bw + 2 * pad, bh + 2 * pad), QColor(ACCENT), 12 / z, 3 / z)
-            for _n, hx, hy in ann.handles(ed.selected):
-                self._knob(p, hx, hy)
-        if ed.tool == "crop" and ed.crop_draft:
-            r = QRectF(*ed.crop_draft)
-            dim = QPainterPath()
-            dim.setFillRule(Qt.FillRule.OddEvenFill)
-            dim.addRect(QRectF(cx, cy, w, h))
-            dim.addRect(r)
-            p.fillPath(dim, QColor(0, 0, 0, 140))
-            p.setPen(QPen(QColor(255, 255, 255, 90), 1 / z))
-            for i in (1, 2):
-                p.drawLine(QPointF(r.left() + r.width() * i / 3, r.top()), QPointF(r.left() + r.width() * i / 3, r.bottom()))
-                p.drawLine(QPointF(r.left(), r.top() + r.height() * i / 3), QPointF(r.right(), r.top() + r.height() * i / 3))
-            draw_brackets(p, r, QColor("white"), 20 / z, 4 / z)
-        p.restore()
-        p.end()
-
-    def _dashed(self, p, rect: QRectF):
-        z = self.ed.zoom
-        pen = QPen(QColor("white"), 1.5 / z, Qt.PenStyle.DashLine)
-        p.setPen(pen)
-        p.setBrush(QColor(255, 255, 255, 25))
-        p.drawRect(rect)
-
-    def _knob(self, p, x, y):
-        z = self.ed.zoom
-        p.setPen(QPen(QColor(ACCENT), 2 / z))
-        p.setBrush(QColor("white"))
-        p.drawEllipse(QPointF(x, y), 5 / z, 5 / z)
-
-    # events ------------------------------------------------------------
-    def mousePressEvent(self, ev):
-        self.setFocus()
-        self.ed.on_press(ev)
-
-    def mouseMoveEvent(self, ev):
-        x, y = self.to_doc(ev.position())
-        self.cursorMoved.emit(x, y)
-        self.ed.on_motion(ev)
-
-    def mouseReleaseEvent(self, ev):
-        self.ed.on_release(ev)
-
-    def mouseDoubleClickEvent(self, ev):
-        self.ed.on_double_click(ev)
-
-    def wheelEvent(self, ev):
-        if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
-            self.ed.set_zoom(self.ed.zoom * (1.15 if ev.angleDelta().y() > 0 else 1 / 1.15))
-            ev.accept()
-        else:
-            ev.ignore()
-
-    def contextMenuEvent(self, ev):
-        self.ed.context_menu(ev)
-
-
-# ====================================================================== floating panels
-class ColorButton(QToolButton):
-    colorChanged = pyqtSignal(str)
-
-    def __init__(self):
-        super().__init__()
-        self.color = "#e53935"
-        self.setToolTip("Colour")
-        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(self)
-        grid = QWidget()
-        lay = QHBoxLayout(grid)
-        lay.setContentsMargins(8, 8, 8, 8)
-        lay.setSpacing(6)
-        for c in SWATCHES:
-            b = QToolButton()
-            b.setFixedSize(26, 26)
-            b.setStyleSheet(f"QToolButton {{ background: {c}; border-radius: 13px; border: 2px solid rgba(255,255,255,0.25); }}"
-                            f"QToolButton:hover {{ border-color: white; }}")
-            b.clicked.connect(lambda _c=False, col=c: (self.set_color(col, emit=True), menu.close()))
-            lay.addWidget(b)
-        more = QToolButton()
-        more.setText("…")
-        more.setToolTip("Other colour")
-        more.clicked.connect(lambda: (menu.close(), self._pick()))
-        lay.addWidget(more)
-        from PyQt6.QtWidgets import QWidgetAction
-
-        act = QWidgetAction(menu)
-        act.setDefaultWidget(grid)
-        menu.addAction(act)
-        self.setMenu(menu)
-        self._paint()
-
-    def _pick(self):
-        c = QColorDialog.getColor(QColor(self.color), self, "Colour")
-        if c.isValid():
-            self.set_color(c.name(), emit=True)
-
-    def set_color(self, color: str, emit=False):
-        self.color = color
-        self._paint()
-        if emit:
-            self.colorChanged.emit(color)
-
-    def _paint(self):
-        self.setStyleSheet("QToolButton { background: transparent; border-radius: 8px; padding: 4px; }"
-                           "QToolButton:hover { background: #383D43; }")
-        from PyQt6.QtGui import QIcon, QPixmap
-
-        pm = QPixmap(40, 40)
-        pm.fill(Qt.GlobalColor.transparent)
-        q = QPainter(pm)
-        q.setRenderHint(QPainter.RenderHint.Antialiasing)
-        q.setPen(QPen(QColor(255, 255, 255, 120), 3))
-        q.setBrush(QColor(self.color))
-        q.drawEllipse(QRectF(4, 4, 32, 32))
-        q.end()
-        pm.setDevicePixelRatio(2)
-        self.setIcon(QIcon(pm))
-        self.setIconSize(QSize(20, 20))
 
 
 # ====================================================================== window
@@ -545,9 +300,12 @@ class Editor(QMainWindow):
                           ("Flip horizontally", lambda: self.image_op("flip_h")),
                           ("Flip vertically", lambda: self.image_op("flip_v")),
                           ("Resize image…", self.resize_dialog), (None, None),
-                          ("Export as PDF…", lambda: (self._flush_save(), ui.export_pdf_dialog(self, self.library, self.config, [self.capture_id]))),
+                          ("Export as PDF…", lambda: (self._flush_save(),
+                                                       ui.export_pdf_dialog(self, self.library, self.config,
+                                                                            [self.capture_id]))),
                           ("Send by email…", lambda: ui.send_email(self._temp())),
-                          ("Show original in file manager", lambda: ui.show_in_folder(self.library.original_path(self.capture_id))),
+                          ("Show original in file manager",
+                           lambda: ui.show_in_folder(self.library.original_path(self.capture_id))),
                           (None, None),
                           ("Revert to original", self.revert),
                           ("Keyboard shortcuts", lambda: self.app.show_shortcuts(self))):
@@ -599,7 +357,7 @@ class Editor(QMainWindow):
             QTimer.singleShot(0, self.zoom_fit)
         elif name != "select":
             self.selected = None
-        self.tool_label.setText(dict((t, l) for t, l, _k in TOOLS)[name])
+        self.tool_label.setText({t: label for t, label, _k in TOOLS}[name])
         self.hint.setText(HINTS.get(name, ""))
         self._load_props(self.styles.get(name, {}))
         self._sync_props()
@@ -615,7 +373,7 @@ class Editor(QMainWindow):
         self.image_ops.setVisible(kind == "select" or self.tool == "crop")
         self.hint.setVisible(not wanted or kind in ("select", "crop"))
         if self.tool == "select" and self.selected:
-            self.tool_label.setText(dict((t, l) for t, l, _k in TOOLS).get(kind, kind))
+            self.tool_label.setText({t: label for t, label, _k in TOOLS}.get(kind, kind))
         QTimer.singleShot(0, self._place_panels)
 
     def _load_props(self, style: dict):
@@ -917,7 +675,7 @@ class Editor(QMainWindow):
                 self.active["x2"], self.active["y2"] = self._constrain(sx, sy, x, y, shift, kind)
             elif kind in ann.RECT_KINDS:
                 ex, ey = self._constrain(sx, sy, x, y, shift, kind)
-                self.active.update(dict(zip("xywh", ann._norm_rect(sx, sy, ex, ey))))
+                self.active.update(dict(zip("xywh", ann._norm_rect(sx, sy, ex, ey), strict=True)))
             elif kind in ann.PATH_KINDS:
                 last = self.active["points"][-1]
                 if math.hypot(x - last[0], y - last[1]) * self.zoom >= 2:
@@ -1243,37 +1001,3 @@ class Editor(QMainWindow):
                 pass
         elif kind == "deleted":
             self.close()
-
-
-class DragHandle(QToolButton):
-    """Drag this into another app to drop the edited image there."""
-
-    def __init__(self, editor: Editor):
-        super().__init__()
-        self.ed = editor
-        self.setIcon(editor.theme.icon("drag", BAR_ICON, 20))
-        self.setText(" Drag")
-        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.setToolTip("Drag into a file manager, browser or chat to share the edited image")
-        self.setCursor(Qt.CursorShape.OpenHandCursor)
-        self._start = None
-
-    def mousePressEvent(self, ev):
-        self._start = ev.position()
-
-    def mouseMoveEvent(self, ev):
-        if self._start is None or (ev.position() - self._start).manhattanLength() < 8:
-            return
-        self._start = None
-        self.ed._flush_save()
-        drag = QDrag(self)
-        drag.setMimeData(ui.drag_mime(self.ed.library, [self.ed.capture_id], self.ed.config, with_ids=False))
-        thumb = render.scale_to_fit(self.ed.render_output(), 160, 120)
-        from PyQt6.QtGui import QPixmap
-
-        drag.setPixmap(QPixmap.fromImage(thumb))
-        drag.exec(Qt.DropAction.CopyAction)
-
-    def mouseReleaseEvent(self, ev):
-        self._start = None
-

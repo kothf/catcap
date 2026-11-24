@@ -6,9 +6,9 @@ import math
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QMarginsF, QPointF, QRectF, QSizeF, Qt
-from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QImage, QImageWriter, QPageSize, QPainter, QPainterPath,
-                         QPdfWriter, QPen)
+from PyQt6.QtCore import QMarginsF, QPointF, QRectF, QSize, QSizeF, Qt
+from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QImage, QImageReader, QImageWriter, QPageSize, QPainter,
+                         QPainterPath, QPdfWriter, QPen)
 
 from .annotations import Document, EFFECT_KINDS, step_label
 
@@ -267,6 +267,15 @@ def _apply_effect(image: QImage, item: dict) -> None:
     w, h = x1 - x0, y1 - y0
     if w < 1 or h < 1:
         return
+    if item["type"] == "redact":
+        # Solid and fully opaque whatever the opacity setting, so nothing underneath survives.
+        p = QPainter(image)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+        color = parse_color(item.get("color", "#000000"))
+        color.setAlpha(255)
+        p.fillRect(x0, y0, w, h, color)
+        p.end()
+        return
     strength = max(2, int(item.get("strength", 12)))
     region = image.copy(x0, y0, w, h)
     if item["type"] == "pixelate":
@@ -339,6 +348,23 @@ def scale_to_fit(image: QImage, max_w: int, max_h: int, upscale: bool = False) -
     return image.scaled(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
+def render_preview(library, capture_id: str, max_w: int, max_h: int) -> QImage:
+    """Capture scaled to fit max_w × max_h. Unedited captures are decoded straight at the small
+    size, which is much faster than loading the full image and scaling it down."""
+    doc = library.load_doc(capture_id)
+    if not doc.is_empty():
+        return scale_to_fit(render_capture(library, capture_id), max_w, max_h)
+    reader = QImageReader(str(library.original_path(capture_id)))
+    size = reader.size()
+    if size.isValid() and (size.width() > max_w or size.height() > max_h):
+        factor = min(max_w / size.width(), max_h / size.height())
+        reader.setScaledSize(QSize(max(1, round(size.width() * factor)), max(1, round(size.height() * factor))))
+    image = reader.read()
+    if image.isNull():
+        raise ValueError(f"cannot read {library.original_path(capture_id)}: {reader.errorString()}")
+    return image
+
+
 def render_thumbnail(library, capture_id: str, size: int = 200) -> QImage:
     """Load or build the cached thumbnail (with annotations)."""
     thumb = library.thumb_path(capture_id)
@@ -353,11 +379,7 @@ def render_thumbnail(library, capture_id: str, size: int = 200) -> QImage:
                 return img
     except FileNotFoundError:
         pass
-    doc = library.load_doc(capture_id)
-    if doc.is_empty():
-        img = scale_to_fit(load_original(original), size, size)
-    else:
-        img = scale_to_fit(render_capture(library, capture_id), size, size)
+    img = render_preview(library, capture_id, size, size)
     if img.save(str(thumb), "PNG"):
         os.chmod(thumb, 0o600)
     return img
@@ -399,7 +421,7 @@ def save_pdf(images, path) -> Path:
     writer.setResolution(96)
     writer.setCreator("CatCap")
     painter = None
-    for i, image in enumerate(images):
+    for image in images:
         size = QPageSize(QSizeF(image.width() * 72 / 96, image.height() * 72 / 96), QPageSize.Unit.Point)
         writer.setPageSize(size)
         writer.setPageMargins(QMarginsF(0, 0, 0, 0))

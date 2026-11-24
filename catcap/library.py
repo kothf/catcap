@@ -60,7 +60,17 @@ CREATE TABLE IF NOT EXISTS capture_collections (
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = 1
+
+# Schema upgrades: MIGRATIONS[n] turns a version n database into version n + 1. When the schema
+# changes, bump SCHEMA_VERSION, update SCHEMA above (for new databases) and add a step here
+# (for existing ones), for example:
+#   MIGRATIONS[1] = ["ALTER TABLE captures ADD COLUMN source_url TEXT NOT NULL DEFAULT ''"]
+MIGRATIONS: dict[int, list[str]] = {}
+
+
+class NewerLibraryError(RuntimeError):
+    """The database was written by a newer CatCap."""
 
 SORTS = {
     "date_desc": "c.created DESC",
@@ -120,14 +130,34 @@ class Library:
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.executescript(SCHEMA)
         self.db.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES('schema', ?)", (SCHEMA_VERSION,)
+            "INSERT OR IGNORE INTO meta(key, value) VALUES('schema', ?)", (str(SCHEMA_VERSION),)
         )
         self.db.commit()
+        self._migrate()
         try:
             os.chmod(self.db_path, 0o600)
         except OSError:
             pass
         self._listeners: list = []
+
+    def schema_version(self) -> int:
+        row = self.db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
+        try:
+            return int(row[0]) if row else SCHEMA_VERSION
+        except (TypeError, ValueError):
+            return 1
+
+    def _migrate(self) -> None:
+        version = self.schema_version()
+        if version > SCHEMA_VERSION:
+            raise NewerLibraryError(f"{self.db_path} was made by a newer CatCap (library version {version}); "
+                                    "please update CatCap")
+        while version < SCHEMA_VERSION:
+            with self.db:   # one transaction per step: a failed upgrade leaves the old version intact
+                for statement in MIGRATIONS[version]:
+                    self.db.execute(statement)
+                version += 1
+                self.db.execute("UPDATE meta SET value=? WHERE key='schema'", (str(version),))
 
     # ------------------------------------------------------------------ events
     def connect(self, callback) -> None:
@@ -254,10 +284,12 @@ class Library:
         if q.annotated_only:
             where.append("c.has_annotations = 1")
         for word in q.search.split():
-            like = f"%{word}%"
+            # % and _ are LIKE wildcards: escape them so searching "50%" finds "50%", not "50" + anything.
+            like = "%" + word.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
             where.append(
-                "(c.name LIKE ? OR c.app LIKE ? OR c.title LIKE ? OR c.notes LIKE ? OR c.ocr LIKE ?"
-                " OR EXISTS (SELECT 1 FROM tags t WHERE t.capture_id = c.id AND t.tag LIKE ?))"
+                "(c.name LIKE ? ESCAPE '\\' OR c.app LIKE ? ESCAPE '\\' OR c.title LIKE ? ESCAPE '\\'"
+                " OR c.notes LIKE ? ESCAPE '\\' OR c.ocr LIKE ? ESCAPE '\\'"
+                " OR EXISTS (SELECT 1 FROM tags t WHERE t.capture_id = c.id AND t.tag LIKE ? ESCAPE '\\'))"
             )
             args.extend([like] * 6)
         order = SORTS.get(q.sort, SORTS["date_desc"])
@@ -474,8 +506,16 @@ class Library:
         return image_size(self.original_path(capture_id))
 
     # ------------------------------------------------------------------ maintenance
-    def rebuild(self) -> int:
-        """Re-add originals found on disk that are missing from the database (LIB-05)."""
+    def rebuild(self) -> tuple[int, list[str]]:
+        """Re-add originals found on disk that are missing from the database (LIB-05).
+
+        Returns (number added, ids of captures whose original file is missing). Missing captures
+        are only reported, never removed here: the image folder may sit on a drive that is not
+        mounted, and dropping the rows would lose names, tags, notes and collections for good.
+        Call forget() for the ids the user really wants gone.
+        """
+        if not self.images_dir.is_dir():
+            raise FileNotFoundError(f"the image folder {self.images_dir} is not available")
         known = {r[0] for r in self.db.execute("SELECT path FROM captures")}
         added = 0
         for png in sorted(self.images_dir.rglob("*.png")):
@@ -493,20 +533,69 @@ class Library:
                 (cid, png.stem, created, created, "recovered", w, h, png.stat().st_size, rel),
             )
             added += 1
-        missing = [r[0] for r in self.db.execute("SELECT id, path FROM captures")
-                   if not (self.images_dir / r[1]).exists()]
-        for cid in missing:
-            self.db.execute("DELETE FROM captures WHERE id=?", (cid,))
         self.db.commit()
         self._emit("rebuilt")
-        return added
+        return added, self.missing()
+
+    def missing(self) -> list[str]:
+        """Ids of captures whose original PNG is not on disk."""
+        return [r[0] for r in self.db.execute("SELECT id, path FROM captures")
+                if not (self.images_dir / r[1]).exists()]
+
+    def forget(self, ids: list[str]) -> None:
+        """Remove captures from the database only (their files are already gone)."""
+        self.db.executemany("DELETE FROM captures WHERE id=?", [(i,) for i in ids])
+        self.db.commit()
+        for cid in ids:
+            try:
+                self.thumb_path(cid).unlink()
+            except FileNotFoundError:
+                pass
+        self._emit("deleted", ids)
 
     def move_images(self, new_dir: Path) -> None:
-        """Move the image store to a new folder (LIB-06)."""
-        new_dir = Path(new_dir)
+        """Move the image store to a new folder (LIB-06).
+
+        Files are moved one by one and merged into folders that already exist, so a target that
+        already has a 2026/ folder does not end up with 2026/2026/. Nothing is overwritten. If a
+        file cannot be moved, everything moved so far goes back and the library stays where it was.
+        """
+        old_dir = self.images_dir.resolve()
+        new_dir = Path(new_dir).expanduser().resolve()
+        if new_dir == old_dir:
+            return
+        if new_dir.is_relative_to(old_dir):
+            raise ValueError("the new folder is inside the current image folder")
+        if old_dir.is_relative_to(new_dir):
+            raise ValueError("the current image folder is inside the new folder")
+        files = [f for f in sorted(old_dir.rglob("*")) if f.is_file() or f.is_symlink()]
+        clashes = [f.relative_to(old_dir).as_posix() for f in files if (new_dir / f.relative_to(old_dir)).exists()]
+        if clashes:
+            more = f" and {len(clashes) - 5} more" if len(clashes) > 5 else ""
+            raise FileExistsError("these files already exist in the new folder: "
+                                  + ", ".join(clashes[:5]) + more)
         paths.ensure_dir(new_dir)
-        for item in self.images_dir.iterdir():
-            shutil.move(str(item), str(new_dir / item.name))
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for src in files:
+                dst = new_dir / src.relative_to(old_dir)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(src), str(dst))
+                moved.append((src, dst))
+        except OSError:
+            for src, dst in reversed(moved):
+                try:
+                    src.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(dst), str(src))
+                except OSError as exc:
+                    print(f"catcap: could not move {dst} back: {exc}")
+            raise
+        # Remove the now empty folders of the old store (keep the old root itself).
+        for d in sorted((d for d in old_dir.rglob("*") if d.is_dir()), key=lambda d: len(d.parts), reverse=True):
+            try:
+                d.rmdir()
+            except OSError:
+                pass
         self.images_dir = new_dir
         self._emit("moved")
 

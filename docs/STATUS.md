@@ -1,6 +1,8 @@
-# Implementation status (v0.2.0)
+# Implementation status (v0.2.3)
 
-v0.2.0 moves the interface from GTK 3 to Qt 6 (PyQt6) with CatCap's own design; features are unchanged.
+v0.2.0 moved the interface from GTK 3 to Qt 6 (PyQt6) with CatCap's own design; v0.2.1 made CatCap tray-first.
+Since then: safer library rebuild and move, a solid Redact tool, a more responsive library and export,
+mixed-DPI and multi-monitor Wayland fixes, lint in CI and offscreen GUI tests.
 
 Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 
@@ -21,6 +23,7 @@ Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 | OVL-06 Snap | 🟡 | Snaps to windows, not to UI elements |
 | OVL-07 Colour under cursor | ✅ | Shown in magnifier, `C` copies HEX |
 | OVL-08 Quick toolbar | ✅ | In the overlay (Capture/Copy/Edit/Pin) and after capture (Copy/Edit/Pin/Library/Discard) |
+| Draw in the overlay | ✅ | Flameshot-style tool column: pen, line, arrow, rectangle, ellipse, marker, text, steps, blur, pixelate, redact; colour, undo/redo, wheel for thickness. Saved as editable annotations |
 | OPT-01..03 | ✅ | Delay with countdown, cursor (X11), after-capture action |
 | OPT-04 | ✅ | Sound + notification toggles |
 | OPT-05/06 Presets | ⬜ | |
@@ -37,7 +40,8 @@ Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 | EDT-08 Filmstrip | ⬜ | |
 | ANN-01..09 | ✅ | Arrow (straight), line, rectangle, ellipse, text, callout, highlighter, pen, numbered steps (1,2,3 / A,B,C, auto-renumber), blur, pixelate |
 | ANN-10 Spotlight | ✅ | |
-| ANN-11..15 | ⬜ | Magnify, stamps, fill, smart redact, cursor overlay |
+| ANN-14 Redact | 🟡 | Manual solid redact box (K); no automatic detection yet |
+| ANN-11..13, 15 | ⬜ | Magnify, stamps, fill, cursor overlay |
 | IMG-01..03 | ✅ | Crop (with aspect presets), resize, rotate, flip |
 | IMG-04..09 | ⬜ | Canvas expand, effects, cut-out, eyedropper in editor, combine, templates |
 | OCR-01..03 | ⬜ | |
@@ -68,13 +72,14 @@ Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 |---|---|---|
 | SET-01..05, APP-01, APP-02, APP-04 | ✅ | |
 | APP-03 Localisation | ⬜ | Strings are not wrapped for translation yet |
-| Wayland (NFR-C2) | ✅ | Portal capture, own overlay on the primary monitor, clear messages; tested against a mock portal, not yet on a real Cinnamon Wayland session |
-| HiDPI / multi-monitor | 🟡 | Scale-aware code, not yet tested on real hardware |
+| Wayland (NFR-C2) | ✅ | Portal capture, own overlay on every monitor, clear messages; tested against a mock portal, not yet on a real Cinnamon Wayland session |
+| HiDPI / multi-monitor | 🟡 | Scale-aware code; mixed scaling on X11 is resampled to one common scale. Not yet tested on real hardware |
 | NFR-S3 Exclude windows | ⬜ | |
 | `.deb` package (NFR-D1) | ✅ | `packaging/build-deb.sh`, built in CI |
 | Flatpak (NFR-D2) | ⬜ | |
 
 ## Tested so far
-- Unit tests: config, library, annotations, rendering/export, filename templates, hotkey parsing, Cinnamon hotkey takeover/restore against the real schemas, and the Wayland portal flow against a mock `xdg-desktop-portal`.
+- Unit tests: config, library, annotations, rendering/export, filename templates, hotkey parsing, Cinnamon hotkey takeover/restore against the real schemas, the Wayland portal flow against a mock `xdg-desktop-portal`, library rebuild/move safety, schema migrations, and
+  offscreen GUI smoke tests (editor tools and autosave, library window, export, drag data, overlay, CLI forwarding).
 - GUI runs under Xvfb + Openbox: full/active/region capture, overlay, quick toolbar, editor tools, crop, library grid/list/preview, settings.
 - Not yet run on a real Linux Mint desktop. Please report anything odd.

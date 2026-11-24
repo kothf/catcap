@@ -217,8 +217,8 @@ def draw_brackets(painter: QPainter, rect: QRectF, color: QColor, length: float 
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    l, t, r, b = rect.left(), rect.top(), rect.right(), rect.bottom()
-    for (x, y, dx, dy) in ((l, t, 1, 1), (r, t, -1, 1), (r, b, -1, -1), (l, b, 1, -1)):
+    left, t, r, b = rect.left(), rect.top(), rect.right(), rect.bottom()
+    for (x, y, dx, dy) in ((left, t, 1, 1), (r, t, -1, 1), (r, b, -1, -1), (left, b, 1, -1)):
         path = QPainterPath(QPointF(x, y + dy * length))
         path.lineTo(QPointF(x, y))
         path.lineTo(QPointF(x + dx * length, y))
@@ -242,6 +242,7 @@ ICONS = {
             '<circle cx="12" cy="12" r="8.5" stroke-dasharray="1.5 3"/>',
     "pixelate": '<path d="M4 4h5v5H4zM15 4h5v5h-5zM9.5 9.5h5v5h-5zM4 15h5v5H4zM15 15h5v5h-5z" '
                 'fill="currentColor" stroke="none"/>',
+    "redact": '<rect x="3" y="8" width="18" height="8" rx="1" fill="currentColor" stroke="none"/>',
     "spotlight": '<path d="M3 5h18v14H3z" fill="currentColor" fill-opacity="0.35" stroke="none"/>'
                  '<circle cx="12" cy="12" r="4.5"/>',
     "crop": '<path d="M7 3v14h14"/><path d="M3 7h14v14"/>',

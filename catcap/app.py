@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtDBus import QDBusConnection, QDBusMessage
+from PyQt6.QtDBus import QDBusConnection, QDBusMessage, QDBusPendingCallWatcher, QDBusPendingReply
 from PyQt6.QtGui import QGuiApplication, QIcon
 from PyQt6.QtNetwork import QLocalServer
 from PyQt6.QtWidgets import QApplication, QMessageBox
@@ -31,13 +31,39 @@ def icon_file() -> str:
     return f"/usr/share/icons/hicolor/scalable/apps/{APP_ID}.svg"
 
 
+def app_icon() -> QIcon:
+    """CatCap's icon as ready-made pixmaps.
+
+    QIcon only reads SVG through Qt's SVG icon engine plugin (qt6-svg-plugins), which is often not
+    installed; without it the tray shows the desktop's "missing icon" placeholder. QSvgRenderer
+    (python3-pyqt6.qtsvg, a hard dependency) always works, so the SVG is rendered here.
+    """
+    from PyQt6.QtCore import QRectF
+    from PyQt6.QtGui import QPainter, QPixmap
+    from PyQt6.QtSvg import QSvgRenderer
+
+    icon = QIcon()
+    renderer = QSvgRenderer(icon_file())
+    if renderer.isValid():
+        for size in (16, 22, 24, 32, 48, 64, 128, 256):
+            pm = QPixmap(size, size)
+            pm.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pm)
+            renderer.render(painter, QRectF(0, 0, size, size))
+            painter.end()
+            icon.addPixmap(pm)
+    if icon.isNull():
+        icon = QIcon.fromTheme(APP_ID)
+    return icon
+
+
 class CatCap:
     def __init__(self, qapp: QApplication):
         self.qapp = qapp
         self.config = Config()
         self.theme = Theme(self.config.get("general", "theme"))
         self.theme.apply(qapp)
-        self.app_icon = QIcon.fromTheme(APP_ID, QIcon(icon_file()))
+        self.app_icon = app_icon()
         self.tray_icon = self.app_icon
         qapp.setWindowIcon(self.app_icon)
         self.library = Library(self.config.images_dir())
@@ -46,6 +72,10 @@ class CatCap:
         except Exception as exc:
             print(f"catcap: trash purge failed: {exc}")
         ui.cleanup_temp()
+        # The tray process can run for weeks: keep clearing old drag/open-with renders.
+        self._cleanup_timer = QTimer(interval=3600 * 1000)
+        self._cleanup_timer.timeout.connect(ui.cleanup_temp)
+        self._cleanup_timer.start()
         self.backend = get_backend()
         from .hotkeys import HotkeyManager
 
@@ -184,18 +214,30 @@ class CatCap:
     def _open_overlay(self, snap: Snapshot, mode: str, action):
         from .overlay import Overlay
 
-        offset = (0, 0)
-        screen = None
+        # On X11 one overlay spans every monitor. On Wayland a window can't be placed across
+        # outputs, so each monitor gets its own full-screen overlay showing its part of the
+        # snapshot; the first one to finish (or cancel) closes the others.
         if snap.backend == "wayland":
-            screen = QGuiApplication.primaryScreen()
-            screens = QGuiApplication.screens()
-            index = screens.index(screen) if screen in screens else 0
-            _n, x, y, w, h = snap.monitors[index] if index < len(snap.monitors) else (
-                "", 0, 0, snap.image.width(), snap.image.height())
-            snap = Snapshot(image=snap.crop(x, y, w, h), scale=snap.scale, backend="wayland")
-            offset = (x, y)
+            parts = []
+            screens = QGuiApplication.screens() or [QGuiApplication.primaryScreen()]
+            for index, screen in enumerate(screens):
+                _n, x, y, w, h = snap.monitors[index] if index < len(snap.monitors) else (
+                    "", 0, 0, snap.image.width(), snap.image.height())
+                parts.append((Snapshot(image=snap.crop(x, y, w, h), scale=snap.scale, backend="wayland"),
+                              (x, y), screen))
+        else:
+            parts = [(snap, (0, 0), None)]
 
-        def done(result):
+        overlays: list = []
+        state = {"done": False}
+
+        def finished(result, offset):
+            if state["done"]:
+                return
+            state["done"] = True
+            for other in overlays:
+                if not other._done:
+                    other._close()
             if result is None:
                 self._end_capture()
                 return
@@ -203,16 +245,24 @@ class CatCap:
             self.config.set("state", "last_region", f"{x + offset[0]},{y + offset[1]},{w},{h}")
             info = type("Info", (), {"app": result.app, "title": result.title})()
             chosen = {"copy": "clipboard", "edit": "editor", "pin": "pin"}.get(result.action)
-            self._store(result.image, result.mode, info, chosen or action)
+            self._store(result.image, result.mode, info, chosen or action, items=result.items)
 
-        overlay = Overlay(snap, mode, self.config, done, screen)
-        self._keep.append(overlay)
-        overlay.destroyed.connect(lambda *_: self._keep.remove(overlay) if overlay in self._keep else None)
-        overlay.start()
+        for part_snap, offset, screen in parts:
+            overlay = Overlay(part_snap, mode, self.config, lambda r, o=offset: finished(r, o), screen)
+            overlays.append(overlay)
+            self._keep.append(overlay)
+            overlay.destroyed.connect(lambda *_, ov=overlay: self._keep.remove(ov) if ov in self._keep else None)
+        for overlay in overlays:
+            overlay.start()
 
-    def _store(self, image, mode, info, action, monitor=""):
+    def _store(self, image, mode, info, action, monitor="", items=None):
         cid = self.library.add_capture(image, mode=mode, app=getattr(info, "app", "") if info else "",
                                        title=getattr(info, "title", "") if info else "", monitor=monitor)
+        if items:
+            # Drawn in the overlay: kept as editable annotations over the untouched original.
+            from .annotations import Document
+
+            self.library.save_doc(cid, Document(items=items))
         self._play_sound()
         action = action or self.config.get("capture", "after_action")
         self._end_capture(restore=action != "editor")
@@ -261,10 +311,18 @@ class CatCap:
         msg = QDBusMessage.createMethodCall("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
                                             "org.freedesktop.Notifications", "Notify")
         msg.setArguments([APP_NAME, 0, icon_file(), title, body, [], {}, 4000])
-        reply = QDBusConnection.sessionBus().call(msg, timeout=1500)
-        if reply.type() == QDBusMessage.MessageType.ErrorMessage:
-            if not (self.tray and self.tray.message(title, body)) and error:
+        # Asynchronous: a slow or missing notification daemon must not freeze the app.
+        watcher = QDBusPendingCallWatcher(QDBusConnection.sessionBus().asyncCall(msg, 1500))
+        self._keep.append(watcher)
+
+        def finished(w):
+            if w in self._keep:
+                self._keep.remove(w)
+            if QDBusPendingReply(w).isError() and not (self.tray and self.tray.message(title, body)) and error:
                 ui.error(None, title, body)
+            w.deleteLater()
+
+        watcher.finished.connect(finished)
 
     # ================================================================ windows
     def show_library(self, select_id: str | None = None):
@@ -385,7 +443,14 @@ def run(args) -> int:
         HotkeyManager(config).remove()
         print("CatCap hotkeys removed; Cinnamon's screenshot keys are restored.")
         return 0
-    app = CatCap(qapp)
+    from .library import NewerLibraryError
+
+    try:
+        app = CatCap(qapp)
+    except NewerLibraryError as exc:
+        print(f"catcap: {exc}", file=sys.stderr)
+        ui.error(None, "CatCap is too old for this library", str(exc))
+        return 1
     path = socket_path()
     QLocalServer.removeServer(path)
     server = QLocalServer()

@@ -6,7 +6,7 @@ import ctypes
 import ctypes.util
 import os
 
-from PyQt6.QtCore import QPoint
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage, QPainter
 
 from . import Snapshot, WindowInfo
@@ -37,21 +37,12 @@ class X11Backend:
         screens = QGuiApplication.screens()
         virtual = QGuiApplication.primaryScreen().virtualGeometry()
         scale = max(s.devicePixelRatio() for s in screens) if screens else 1.0
-        image = QImage(round(virtual.width() * scale), round(virtual.height() * scale), FMT)
-        image.fill(0)
-        painter = QPainter(image)
-        monitors = []
+        grabs = []
         for screen in screens:
-            geo = screen.geometry()
             pixmap = screen.grabWindow(0)
-            if pixmap.isNull():
-                continue
-            x = round((geo.x() - virtual.x()) * scale)
-            y = round((geo.y() - virtual.y()) * scale)
-            painter.drawImage(x, y, pixmap.toImage())
-            monitors.append((screen.name() or screen.model() or "Monitor", x, y,
-                             round(geo.width() * scale), round(geo.height() * scale)))
-        painter.end()
+            if not pixmap.isNull():
+                grabs.append((screen.name() or screen.model() or "Monitor", screen.geometry(), pixmap.toImage()))
+        image, monitors = compose_screens(grabs, virtual, scale)
         if not monitors:
             raise RuntimeError("could not read the screen")
         pos: QPoint = QCursor.pos()
@@ -63,6 +54,33 @@ class X11Backend:
             composite_cursor(image, offset)
         return Snapshot(image=image, scale=scale, origin=(virtual.x(), virtual.y()), windows=windows,
                         active=active, monitors=monitors, pointer=pointer, backend="x11")
+
+
+def compose_screens(grabs, virtual, scale: float):
+    """Paint per-screen grabs [(name, logical QRect, QImage)] into one image in device pixels.
+
+    Returns (image, monitors). Grabs carry their screen's device pixel ratio (1.25 at 120 dpi,
+    for example); QPainter would honour it and draw the grab at its logical size, shrinking the
+    screen into the top-left corner. The ratio is reset so one grab pixel is one image pixel, and
+    a grab from a screen with a different scale is resampled to fill its slot.
+    """
+    image = QImage(round(virtual.width() * scale), round(virtual.height() * scale), FMT)
+    image.fill(0)
+    painter = QPainter(image)
+    monitors = []
+    for name, geo, shot in grabs:
+        x = round((geo.x() - virtual.x()) * scale)
+        y = round((geo.y() - virtual.y()) * scale)
+        tw, th = round(geo.width() * scale), round(geo.height() * scale)
+        if (shot.width(), shot.height()) != (tw, th):
+            shot = shot.scaled(tw, th, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        else:
+            shot = QImage(shot)   # don't change the caller's image
+        shot.setDevicePixelRatio(1.0)
+        painter.drawImage(x, y, shot)
+        monitors.append((name, x, y, tw, th))
+    painter.end()
+    return image, monitors
 
 
 def _shift(win: WindowInfo, offset) -> WindowInfo:

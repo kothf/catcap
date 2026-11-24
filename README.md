@@ -28,6 +28,11 @@ region, middle-click to open the library, right-click for every capture type, re
 “Copy last capture” and “Start at login”. Closing the library keeps it running in the tray.
 It starts at login by default (untick it in the welcome dialog, the tray menu or Settings).
 
+After you select a region, a tool column next to it lets you draw straight on the frozen screen,
+like Flameshot: pen, line, arrow, rectangle, ellipse, marker, text, numbered steps, blur, pixelate and
+redact, with a colour button, undo/redo (Ctrl+Z) and the mouse wheel for thickness. What you draw is
+saved as normal annotations, so you can still change it later in the editor.
+
 Global hotkeys (Print Screen and friends) are switched on in the welcome dialog or in
 **Settings › Hotkeys**. On Cinnamon they are registered as Cinnamon custom shortcuts, so they
 also work in the Wayland session.
@@ -42,7 +47,7 @@ then installs PyQt6 with pip for your user.
 
 ```bash
 ./packaging/build-deb.sh                          # creates dist/catcap_<version>_all.deb
-sudo apt install ./dist/catcap_0.2.1_all.deb      # then start “CatCap” from the Mint menu
+sudo apt install ./dist/catcap_0.2.3_all.deb      # then start “CatCap” from the Mint menu
 ```
 
 GitHub Actions also builds the package on every push (download it from the run's
@@ -61,16 +66,27 @@ Uninstall with `sudo apt remove catcap`. Your captures stay in `~/Pictures/CatCa
 | Settings | `~/.config/catcap/config.toml` |
 
 Edited images are rendered on demand when you copy, export or drag them; they are not stored.
+The PNGs in the image folder are always the untouched originals, so blurred or redacted areas are
+still visible in them: share captures by copying, dragging or exporting them from CatCap.
+
+**Rebuild library from disk** (library menu) re-adds PNGs that are missing from the database. Captures
+whose file can't be found are kept unless you confirm removing them, so a library on an unplugged
+drive doesn't lose its tags and notes.
 
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v                 # core tests
+python3 -m unittest discover -s tests -v                 # core and offscreen GUI tests
 dbus-run-session -- python3 -m unittest discover -s tests  # also runs the Wayland portal tests
+pipx run ruff check catcap tests                         # lint (CI runs this too)
 ```
 
+The library database carries a schema version. When you change `SCHEMA` in `library.py`, bump
+`SCHEMA_VERSION` and add the upgrade statements to `MIGRATIONS` so existing libraries are upgraded.
+
 Built with Python 3 and Qt 6 (PyQt6). Code layout: `catcap/capture/` (X11 and portal backends),
-`overlay.py` (region selection), `editor.py`, `library_window.py`, `library.py` (SQLite),
+`overlay.py` (region selection), `editor.py` (+ `editor_tools.py`, `editor_widgets.py`),
+`library_window.py` (+ `library_views.py`), `library.py` (SQLite),
 `annotations.py` + `render.py` (non-destructive editing), `theme.py` (palette, stylesheet, icons),
 `hotkeys.py`, `tray.py`, `app.py` (CLI and workflow).
 

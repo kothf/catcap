@@ -46,6 +46,7 @@ install -m 0644 "$ROOT/data/icons/hicolor/symbolic/apps/io.github.kothf.CatCap-s
 } > "$STAGE/usr/share/doc/catcap/copyright"
 printf 'catcap (%s) unstable; urgency=low\n\n  * Release %s.\n\n -- CatCap contributors <noreply@github.com>  %s\n' \
     "$VERSION" "$VERSION" "$(date -R)" | gzip -9n > "$STAGE/usr/share/doc/catcap/changelog.gz"
+chmod 0644 "$STAGE/usr/share/doc/catcap/copyright" "$STAGE/usr/share/doc/catcap/changelog.gz"   # independent of umask
 
 SIZE="$(du -sk "$STAGE/usr" | cut -f1)"
 cat > "$STAGE/DEBIAN/control" <<CONTROL
@@ -56,7 +57,7 @@ Priority: optional
 Architecture: all
 Installed-Size: ${SIZE}
 Depends: python3 (>= 3.10), python3-pyqt6, python3-pyqt6.qtsvg, python3-xlib
-Recommends: qt6-image-formats-plugins, qt6-wayland, xdg-desktop-portal, xdg-desktop-portal-xapp | xdg-desktop-portal-gtk, xdg-utils, libglib2.0-bin
+Recommends: qt6-svg-plugins, qt6-image-formats-plugins, qt6-wayland, xdg-desktop-portal, xdg-desktop-portal-xapp | xdg-desktop-portal-gtk, xdg-utils, libglib2.0-bin
 Suggests: gnome-session-canberra
 Maintainer: CatCap contributors <noreply@github.com>
 Homepage: https://github.com/kothf/catcap

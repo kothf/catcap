@@ -24,7 +24,8 @@ APP = QApplication.instance() or QApplication([])
 class TempHome(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="catcap-test-"))
-        self._env = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME")}
+        self._env = {k: os.environ.get(k) for k in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+                                                    "XDG_RUNTIME_DIR")}
         os.environ["XDG_CONFIG_HOME"] = str(self.tmp / "cfg")
         os.environ["XDG_DATA_HOME"] = str(self.tmp / "data")
         os.environ["XDG_CACHE_HOME"] = str(self.tmp / "cache")
@@ -130,7 +131,88 @@ class LibraryTests(TempHome):
         # rebuild re-adds files that are missing from the database
         lib.db.execute("DELETE FROM captures")
         lib.db.commit()
-        self.assertEqual(lib.rebuild(), 1)
+        self.assertEqual(lib.rebuild(), (1, []))
+
+    def test_search_treats_percent_and_underscore_literally(self):
+        from catcap.library import Query
+
+        lib = self.make()
+        a = lib.add_capture(self.pixbuf(), name="50% off")
+        lib.add_capture(self.pixbuf(), name="500 items")
+        b = lib.add_capture(self.pixbuf(), name="snake_case")
+        lib.add_capture(self.pixbuf(), name="snakeXcase")
+        self.assertEqual([c.id for c in lib.query(Query(search="50%"))], [a])
+        self.assertEqual([c.id for c in lib.query(Query(search="e_c"))], [b])
+
+    def test_schema_migrations_run_and_newer_db_is_refused(self):
+        from catcap import library as libmod
+
+        lib = self.make()
+        self.assertEqual(lib.schema_version(), libmod.SCHEMA_VERSION)
+        lib.close()
+        old = (libmod.SCHEMA_VERSION, dict(libmod.MIGRATIONS))
+        try:
+            libmod.SCHEMA_VERSION = old[0] + 1
+            libmod.MIGRATIONS[old[0]] = ["ALTER TABLE captures ADD COLUMN extra TEXT NOT NULL DEFAULT ''"]
+            lib = self.make()
+            self.assertEqual(lib.schema_version(), old[0] + 1)
+            cols = [r[1] for r in lib.db.execute("PRAGMA table_info(captures)")]
+            self.assertIn("extra", cols)
+            lib.close()
+            libmod.SCHEMA_VERSION, libmod.MIGRATIONS = old[0], dict(old[1])
+            with self.assertRaises(libmod.NewerLibraryError):
+                self.make()
+        finally:
+            libmod.SCHEMA_VERSION, libmod.MIGRATIONS = old[0], dict(old[1])
+
+    def test_rebuild_keeps_captures_whose_files_are_missing(self):
+        lib = self.make()
+        a = lib.add_capture(self.pixbuf())
+        lib.set_tags(a, ["keep me"])
+        lib.original_path(a).unlink()
+        added, missing = lib.rebuild()
+        self.assertEqual((added, missing), (0, [a]))
+        self.assertTrue(lib.exists(a))
+        self.assertEqual(lib.get_tags(a), ["keep me"])
+        lib.forget(missing)
+        self.assertFalse(lib.exists(a))
+
+    def test_rebuild_refuses_when_folder_is_gone(self):
+        lib = self.make()
+        a = lib.add_capture(self.pixbuf())
+        shutil.rmtree(lib.images_dir)
+        with self.assertRaises(FileNotFoundError):
+            lib.rebuild()
+        self.assertTrue(lib.exists(a))
+
+    def test_move_images_merges_into_existing_folders(self):
+        lib = self.make()
+        a = lib.add_capture(self.pixbuf())
+        rel = lib.get(a).path
+        target = self.tmp / "elsewhere"
+        year = rel.split("/")[0]
+        (target / year).mkdir(parents=True)
+        (target / year / "other.txt").write_text("x")
+        lib.move_images(target)
+        self.assertEqual(lib.images_dir, target.resolve())
+        self.assertTrue((target / rel).exists())
+        self.assertFalse((target / year / year).exists())
+        self.assertTrue((target / year / "other.txt").exists())
+
+    def test_move_images_refuses_clashes_and_nested_targets(self):
+        lib = self.make()
+        a = lib.add_capture(self.pixbuf())
+        rel = lib.get(a).path
+        old = lib.images_dir
+        with self.assertRaises(ValueError):
+            lib.move_images(old / "sub")
+        target = self.tmp / "clash"
+        (target / rel).parent.mkdir(parents=True)
+        (target / rel).write_text("not mine")
+        with self.assertRaises(FileExistsError):
+            lib.move_images(target)
+        self.assertEqual(lib.images_dir, old)
+        self.assertTrue((old / rel).exists())
 
 
 class AnnotationTests(unittest.TestCase):
@@ -200,6 +282,65 @@ class RenderTests(TempHome):
         doc.rotate_cw(400, 300)
         out = render.render(src, doc)
         self.assertEqual((out.width(), out.height()), (50, 100))
+
+    def test_screen_grabs_fill_the_snapshot_at_fractional_scaling(self):
+        from PyQt6.QtCore import QRect
+
+        from catcap.capture.x11 import compose_screens
+
+        # One 2560x1440 monitor at 120 dpi: Qt sees 2048x1152 logical px at a ratio of 1.25.
+        grab = self.pixbuf(2560, 1440, "#ff0000")
+        grab.setDevicePixelRatio(1.25)
+        image, monitors = compose_screens([("DP-0", QRect(0, 0, 2048, 1152), grab)], QRect(0, 0, 2048, 1152), 1.25)
+        self.assertEqual((image.width(), image.height()), (2560, 1440))
+        self.assertEqual(image.pixelColor(2559, 1439).name(), "#ff0000")
+        self.assertEqual(monitors, [("DP-0", 0, 0, 2560, 1440)])
+
+    def test_mixed_scale_screens_are_resampled_into_their_slots(self):
+        from PyQt6.QtCore import QRect
+
+        from catcap.capture.x11 import compose_screens
+
+        left = self.pixbuf(2000, 1000, "#00ff00")     # 1000x500 logical at 2.0
+        left.setDevicePixelRatio(2.0)
+        right = self.pixbuf(1000, 500, "#0000ff")     # 1000x500 logical at 1.0
+        image, monitors = compose_screens([("A", QRect(0, 0, 1000, 500), left), ("B", QRect(1000, 0, 1000, 500), right)],
+                                          QRect(0, 0, 2000, 500), 2.0)
+        self.assertEqual((image.width(), image.height()), (4000, 1000))
+        self.assertEqual(image.pixelColor(1999, 999).name(), "#00ff00")
+        self.assertEqual(image.pixelColor(3999, 999).name(), "#0000ff")
+        self.assertEqual(monitors[1], ("B", 2000, 0, 2000, 1000))
+
+    def test_temp_renders_with_the_same_name_do_not_collide(self):
+        from catcap import ui
+        from catcap.config import Config
+        from catcap.library import Library
+
+        os.environ["XDG_RUNTIME_DIR"] = str(self.tmp / "run")
+        lib = Library(self.tmp / "pics")
+        config = Config()
+        config.set("output", "filename_template", "{app}")
+        a = lib.add_capture(self.pixbuf(color="#ff0000"), app="Same")
+        b = lib.add_capture(self.pixbuf(color="#0000ff"), app="Same")
+        pa, pb = ui.temp_render(lib, a, config), ui.temp_render(lib, b, config)
+        self.assertNotEqual(pa, pb)
+        self.assertEqual((pa.name, pb.name), ("Same.png", "Same.png"))
+        self.assertEqual(QImage(str(pa)).pixelColor(5, 5).name(), "#ff0000")
+        self.assertEqual(QImage(str(pb)).pixelColor(5, 5).name(), "#0000ff")
+        ui.cleanup_temp(max_age=-1)
+        self.assertFalse(pa.exists())
+
+    def test_redact_covers_area_with_opaque_colour(self):
+        from catcap import render
+        from catcap.annotations import Document
+
+        src = self.pixbuf(100, 80, "#3366CC")
+        doc = Document(items=[{"type": "redact", "x": 10, "y": 10, "w": 30, "h": 20,
+                               "color": "#000000", "opacity": 0.2}])
+        out = render.render(src, doc)
+        self.assertEqual(out.pixelColor(20, 20).name(), "#000000")
+        self.assertEqual(out.pixelColor(20, 20).alpha(), 255)
+        self.assertEqual(out.pixelColor(60, 60).name(), "#3366cc")
 
 
 class FilenameAndHotkeyTests(unittest.TestCase):
