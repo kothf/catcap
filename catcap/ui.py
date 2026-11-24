@@ -10,10 +10,10 @@ import subprocess
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QMimeData, QUrl
-from PyQt6.QtDBus import QDBusConnection, QDBusMessage
+from PyQt6.QtCore import QMimeData, Qt, QUrl
+from PyQt6.QtDBus import QDBusConnection, QDBusMessage, QDBusPendingCallWatcher
 from PyQt6.QtGui import QDesktopServices, QGuiApplication
-from PyQt6.QtWidgets import QFileDialog, QInputDialog, QLineEdit, QMenu, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QLineEdit, QMenu, QMessageBox, QProgressDialog
 
 from . import paths, render
 
@@ -71,12 +71,70 @@ def temp_render(library, capture_id: str, config) -> Path:
     return out
 
 
+class LazyMime(QMimeData):
+    """Drag data whose image files are rendered only when a drop target asks for them.
+
+    Starting a drag of many captures used to render every one of them first, which froze the
+    window; drags onto CatCap's own sidebar only need the ids and now render nothing.
+    """
+
+    URI_TYPES = ("text/uri-list",)
+
+    def __init__(self, library, ids, config, with_ids: bool = True):
+        super().__init__()
+        self._library, self._ids, self._config = library, list(ids), config
+        self._urls: list | None = None
+        if with_ids:
+            self.setData(IDS_MIME, "\n".join(ids).encode())
+
+    def _rendered(self) -> list:
+        if self._urls is None:
+            self._urls = [QUrl.fromLocalFile(str(temp_render(self._library, i, self._config))) for i in self._ids]
+        return self._urls
+
+    def formats(self):
+        return list(self.URI_TYPES) + [f for f in super().formats() if f not in self.URI_TYPES]
+
+    def hasFormat(self, mime_type):
+        return mime_type in self.URI_TYPES or super().hasFormat(mime_type)
+
+    def hasUrls(self):
+        return True
+
+    def urls(self):
+        return self._rendered()
+
+    def retrieveData(self, mime_type, preferred_type):
+        if mime_type in self.URI_TYPES:
+            return "".join(u.toString() + "\r\n" for u in self._rendered()).encode()
+        return super().retrieveData(mime_type, preferred_type)
+
+
 def drag_mime(library, ids, config, with_ids: bool = True) -> QMimeData:
-    mime = QMimeData()
-    mime.setUrls([QUrl.fromLocalFile(str(temp_render(library, i, config))) for i in ids])
-    if with_ids:
-        mime.setData(IDS_MIME, "\n".join(ids).encode())
-    return mime
+    return LazyMime(library, ids, config, with_ids)
+
+
+def for_each_with_progress(parent, label: str, items, fn) -> bool:
+    """Call fn(item) for each item with a cancellable progress dialog. False if cancelled."""
+    items = list(items)
+    if len(items) < 3:
+        for item in items:
+            fn(item)
+        return True
+    dlg = QProgressDialog(label, "Cancel", 0, len(items), parent)
+    dlg.setWindowModality(Qt.WindowModality.WindowModal)
+    dlg.setMinimumDuration(300)
+    try:
+        for n, item in enumerate(items):
+            dlg.setValue(n)
+            QApplication.processEvents()
+            if dlg.wasCanceled():
+                return False
+            fn(item)
+        dlg.setValue(len(items))
+        return True
+    finally:
+        dlg.close()
 
 
 def cleanup_temp(max_age: float = 3600) -> None:
@@ -137,13 +195,16 @@ def export_dialog(parent, library, config, ids: list[str]) -> None:
     ext = render.EXPORT_FORMATS.get(fmt, ("", ".png"))[1]
     try:
         used = set()
-        for cid in ids:
+
+        def export_one(cid):
             base = format_filename(template, library.get(cid))
             name, n = base, 2
             while name in used or (folder / f"{name}{ext}").exists():
                 name, n = f"{base}_{n}", n + 1
             used.add(name)
             render.save_image(render.render_capture(library, cid), folder / f"{name}{ext}", fmt, quality)
+
+        for_each_with_progress(parent, f"Exporting {len(ids)} captures…", ids, export_one)
         config.set("output", "last_export_dir", str(folder))
     except Exception as exc:
         error(parent, "Export failed", str(exc))
@@ -160,7 +221,11 @@ def export_pdf_dialog(parent, library, config, ids: list[str]) -> None:
         return
     path = Path(path).with_suffix(".pdf")
     try:
-        render.save_pdf([render.render_capture(library, i) for i in ids], path)
+        images = []
+        if not for_each_with_progress(parent, f"Preparing {len(ids)} pages…", ids,
+                                      lambda i: images.append(render.render_capture(library, i))):
+            return
+        render.save_pdf(images, path)
         config.set("output", "last_export_dir", str(path.parent))
     except Exception as exc:
         error(parent, "Export failed", str(exc))
@@ -171,9 +236,20 @@ def show_in_folder(path: Path) -> None:
     msg = QDBusMessage.createMethodCall("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
                                         "org.freedesktop.FileManager1", "ShowItems")
     msg.setArguments([[QUrl.fromLocalFile(str(path)).toString()], ""])
-    reply = QDBusConnection.sessionBus().call(msg)
-    if reply.type() == QDBusMessage.MessageType.ErrorMessage:
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+    # Asynchronous, so a file manager that is slow to start can't freeze CatCap.
+    watcher = QDBusPendingCallWatcher(QDBusConnection.sessionBus().asyncCall(msg, 5000))
+    _pending.add(watcher)
+
+    def finished(w):
+        _pending.discard(w)
+        if w.isError():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+        w.deleteLater()
+
+    watcher.finished.connect(finished)
+
+
+_pending: set = set()   # keeps D-Bus watchers alive until they finish
 
 
 def image_apps() -> list[tuple[str, str]]:

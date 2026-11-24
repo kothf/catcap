@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtDBus import QDBusConnection, QDBusMessage
+from PyQt6.QtDBus import QDBusConnection, QDBusMessage, QDBusPendingCallWatcher
 from PyQt6.QtGui import QGuiApplication, QIcon
 from PyQt6.QtNetwork import QLocalServer
 from PyQt6.QtWidgets import QApplication, QMessageBox
@@ -188,18 +188,30 @@ class CatCap:
     def _open_overlay(self, snap: Snapshot, mode: str, action):
         from .overlay import Overlay
 
-        offset = (0, 0)
-        screen = None
+        # On X11 one overlay spans every monitor. On Wayland a window can't be placed across
+        # outputs, so each monitor gets its own full-screen overlay showing its part of the
+        # snapshot; the first one to finish (or cancel) closes the others.
         if snap.backend == "wayland":
-            screen = QGuiApplication.primaryScreen()
-            screens = QGuiApplication.screens()
-            index = screens.index(screen) if screen in screens else 0
-            _n, x, y, w, h = snap.monitors[index] if index < len(snap.monitors) else (
-                "", 0, 0, snap.image.width(), snap.image.height())
-            snap = Snapshot(image=snap.crop(x, y, w, h), scale=snap.scale, backend="wayland")
-            offset = (x, y)
+            parts = []
+            screens = QGuiApplication.screens() or [QGuiApplication.primaryScreen()]
+            for index, screen in enumerate(screens):
+                _n, x, y, w, h = snap.monitors[index] if index < len(snap.monitors) else (
+                    "", 0, 0, snap.image.width(), snap.image.height())
+                parts.append((Snapshot(image=snap.crop(x, y, w, h), scale=snap.scale, backend="wayland"),
+                              (x, y), screen))
+        else:
+            parts = [(snap, (0, 0), None)]
 
-        def done(result):
+        overlays: list = []
+        state = {"done": False}
+
+        def finished(result, offset):
+            if state["done"]:
+                return
+            state["done"] = True
+            for other in overlays:
+                if not other._done:
+                    other._close()
             if result is None:
                 self._end_capture()
                 return
@@ -209,10 +221,13 @@ class CatCap:
             chosen = {"copy": "clipboard", "edit": "editor", "pin": "pin"}.get(result.action)
             self._store(result.image, result.mode, info, chosen or action)
 
-        overlay = Overlay(snap, mode, self.config, done, screen)
-        self._keep.append(overlay)
-        overlay.destroyed.connect(lambda *_: self._keep.remove(overlay) if overlay in self._keep else None)
-        overlay.start()
+        for part_snap, offset, screen in parts:
+            overlay = Overlay(part_snap, mode, self.config, lambda r, o=offset: finished(r, o), screen)
+            overlays.append(overlay)
+            self._keep.append(overlay)
+            overlay.destroyed.connect(lambda *_, ov=overlay: self._keep.remove(ov) if ov in self._keep else None)
+        for overlay in overlays:
+            overlay.start()
 
     def _store(self, image, mode, info, action, monitor=""):
         cid = self.library.add_capture(image, mode=mode, app=getattr(info, "app", "") if info else "",
@@ -265,10 +280,18 @@ class CatCap:
         msg = QDBusMessage.createMethodCall("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
                                             "org.freedesktop.Notifications", "Notify")
         msg.setArguments([APP_NAME, 0, icon_file(), title, body, [], {}, 4000])
-        reply = QDBusConnection.sessionBus().call(msg, timeout=1500)
-        if reply.type() == QDBusMessage.MessageType.ErrorMessage:
-            if not (self.tray and self.tray.message(title, body)) and error:
+        # Asynchronous: a slow or missing notification daemon must not freeze the app.
+        watcher = QDBusPendingCallWatcher(QDBusConnection.sessionBus().asyncCall(msg, 1500))
+        self._keep.append(watcher)
+
+        def finished(w):
+            if w in self._keep:
+                self._keep.remove(w)
+            if w.isError() and not (self.tray and self.tray.message(title, body)) and error:
                 ui.error(None, title, body)
+            w.deleteLater()
+
+        watcher.finished.connect(finished)
 
     # ================================================================ windows
     def show_library(self, select_id: str | None = None):

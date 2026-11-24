@@ -6,9 +6,9 @@ import math
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import QMarginsF, QPointF, QRectF, QSizeF, Qt
-from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QImage, QImageWriter, QPageSize, QPainter, QPainterPath,
-                         QPdfWriter, QPen)
+from PyQt6.QtCore import QMarginsF, QPointF, QRectF, QSize, QSizeF, Qt
+from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QImage, QImageReader, QImageWriter, QPageSize, QPainter,
+                         QPainterPath, QPdfWriter, QPen)
 
 from .annotations import Document, EFFECT_KINDS, step_label
 
@@ -348,6 +348,23 @@ def scale_to_fit(image: QImage, max_w: int, max_h: int, upscale: bool = False) -
     return image.scaled(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
 
 
+def render_preview(library, capture_id: str, max_w: int, max_h: int) -> QImage:
+    """Capture scaled to fit max_w × max_h. Unedited captures are decoded straight at the small
+    size, which is much faster than loading the full image and scaling it down."""
+    doc = library.load_doc(capture_id)
+    if not doc.is_empty():
+        return scale_to_fit(render_capture(library, capture_id), max_w, max_h)
+    reader = QImageReader(str(library.original_path(capture_id)))
+    size = reader.size()
+    if size.isValid() and (size.width() > max_w or size.height() > max_h):
+        factor = min(max_w / size.width(), max_h / size.height())
+        reader.setScaledSize(QSize(max(1, round(size.width() * factor)), max(1, round(size.height() * factor))))
+    image = reader.read()
+    if image.isNull():
+        raise ValueError(f"cannot read {library.original_path(capture_id)}: {reader.errorString()}")
+    return image
+
+
 def render_thumbnail(library, capture_id: str, size: int = 200) -> QImage:
     """Load or build the cached thumbnail (with annotations)."""
     thumb = library.thumb_path(capture_id)
@@ -362,11 +379,7 @@ def render_thumbnail(library, capture_id: str, size: int = 200) -> QImage:
                 return img
     except FileNotFoundError:
         pass
-    doc = library.load_doc(capture_id)
-    if doc.is_empty():
-        img = scale_to_fit(load_original(original), size, size)
-    else:
-        img = scale_to_fit(render_capture(library, capture_id), size, size)
+    img = render_preview(library, capture_id, size, size)
     if img.save(str(thumb), "PNG"):
         os.chmod(thumb, 0o600)
     return img

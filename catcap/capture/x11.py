@@ -6,7 +6,7 @@ import ctypes
 import ctypes.util
 import os
 
-from PyQt6.QtCore import QPoint
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QCursor, QGuiApplication, QImage, QPainter
 
 from . import Snapshot, WindowInfo
@@ -48,7 +48,14 @@ class X11Backend:
                 continue
             x = round((geo.x() - virtual.x()) * scale)
             y = round((geo.y() - virtual.y()) * scale)
-            painter.drawImage(x, y, pixmap.toImage())
+            shot = pixmap.toImage()
+            # With mixed scaling a screen's grab comes back at its own device pixel ratio; bring
+            # it to the snapshot's common scale so it fills its slot instead of leaving a gap.
+            tw, th = round(geo.width() * scale), round(geo.height() * scale)
+            if (shot.width(), shot.height()) != (tw, th):
+                shot = shot.scaled(tw, th, Qt.AspectRatioMode.IgnoreAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+            painter.drawImage(x, y, shot)
             monitors.append((screen.name() or screen.model() or "Monitor", x, y,
                              round(geo.width() * scale), round(geo.height() * scale)))
         painter.end()

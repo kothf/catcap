@@ -238,6 +238,9 @@ class LibraryWindow(QMainWindow):
         self.query = Query(sort=self.config.get("library", "sort"))
         self.captures = []
         self._preview_id = None
+        self._preview_pending = None
+        self._preview_timer = QTimer(self, singleShot=True, interval=120)
+        self._preview_timer.timeout.connect(self._render_preview)
         self._loading = False
         self.setWindowTitle("CatCap")
         self.setWindowIcon(app.app_icon)
@@ -892,6 +895,18 @@ class LibraryWindow(QMainWindow):
             self.open_editor(ids[0])
 
     # ------------------------------------------------------------ details pane
+    def _render_preview(self):
+        cid = getattr(self, "_preview_pending", None)
+        if cid is None or cid != self._preview_id:
+            return
+        try:
+            img = render.render_preview(self.library, cid, 600, 380)
+            pm = QPixmap.fromImage(img)
+            pm.setDevicePixelRatio(2)
+            self.preview.setPixmap(pm)
+        except Exception:
+            self.preview.clear()
+
     def _update_details(self):
         ids = self.selected_ids()
         trash = self.query.view == "trash"
@@ -912,13 +927,15 @@ class LibraryWindow(QMainWindow):
         self._loading = True
         self.details_stack.setCurrentIndex(0)
         if self._preview_id != cap.id:
-            try:
-                img = render.scale_to_fit(render.render_capture(self.library, cap.id), 600, 380)
-                pm = QPixmap.fromImage(img)
-                pm.setDevicePixelRatio(2)
-                self.preview.setPixmap(pm)
-            except Exception:
+            # Rendering a big capture takes a moment: show the cached thumbnail at once and render
+            # the sharp preview shortly after, so holding an arrow key through the grid stays smooth.
+            thumb = self.model.thumbs.get(cap.id) if hasattr(self, "model") else None
+            if thumb is not None and not thumb.isNull():
+                self.preview.setPixmap(QPixmap.fromImage(thumb))
+            else:
                 self.preview.clear()
+            self._preview_pending = cap.id
+            self._preview_timer.start()
         self._preview_id = cap.id
         self.name_edit.setText(cap.name)
         self.fav_btn.setChecked(cap.favourite)
