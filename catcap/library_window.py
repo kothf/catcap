@@ -289,7 +289,7 @@ class LibraryWindow(Gtk.ApplicationWindow):
         if tags:
             self.sidebar.add(self._sidebar_header("Tags"))
             for tag, count in tags:
-                self.sidebar.add(self._sidebar_row(("tag", tag), tag, count, "tag-symbolic"))
+                self.sidebar.add(self._sidebar_row(("tag", tag), "# " + tag, count))
         self.sidebar.show_all()
         self._selecting_sidebar = True
         for row in self.sidebar.get_children():
@@ -305,30 +305,25 @@ class LibraryWindow(Gtk.ApplicationWindow):
         self.icon_view = Gtk.IconView(model=self.grid_store)
         self.icon_view.set_pixbuf_column(COL_PIXBUF)
         self.icon_view.set_markup_column(COL_MARKUP)
-        self.icon_view.set_item_width(self.thumb_size + 16)
+        # GtkIconView lays an item out at about 2 × item-width − 36 px, so this gives cells
+        # roughly thumb_size + 20 px wide.
+        self.icon_view.set_item_width((self.thumb_size + 56) // 2)
         self.icon_view.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
         self.icon_view.set_margin(8)
         self.icon_view.set_column_spacing(6)
         self.icon_view.set_row_spacing(6)
         self.icon_view.connect("selection-changed", lambda *_: self._update_preview())
         self.icon_view.set_item_padding(4)
-        self.icon_view.connect("size-allocate", self._on_grid_allocate)
         self.icon_view.connect("item-activated", lambda _v, path: self.open_editor(self.grid_store[path][COL_ID]))
         self.icon_view.connect("button-press-event", self._on_grid_button)
         self.icon_view.enable_model_drag_source(Gdk.ModifierType.BUTTON1_MASK, [ui.URI_TARGET, ui.IDS_TARGET],
                                                 Gdk.DragAction.COPY)
         self.icon_view.connect("drag-data-get", self._on_drag_data_get)
-        sw = Gtk.ScrolledWindow()
+        sw = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
         sw.add(self.icon_view)
         sw.get_vadjustment().connect("value-changed", lambda *_: self._queue_thumbs())
         self.grid_scroller = sw
         return sw
-
-    def _on_grid_allocate(self, view, alloc):
-        cell = self.thumb_size + 16 + 2 * view.get_item_padding() + view.get_column_spacing()
-        cols = max(1, (alloc.width - 2 * view.get_margin()) // cell)
-        if view.get_columns() != cols:
-            GLib.idle_add(view.set_columns, cols)
 
     def _build_list(self):
         self.list_store = Gtk.TreeStore(str, str, str, str, str, str, str, bool)
