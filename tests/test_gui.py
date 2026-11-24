@@ -110,6 +110,23 @@ class EditorTests(AppTestCase):
         self.assertEqual(len(ed.doc.items), 1)
 
 
+class AboutTests(AppTestCase):
+    def test_about_shows_author_and_credits(self):
+        from PyQt6.QtWidgets import QMessageBox
+
+        from catcap import CREDITS
+
+        with mock.patch.object(QMessageBox, "about") as about:
+            self.app.show_about()
+        text = about.call_args.args[2]
+        self.assertIn("Created by", text)
+        self.assertIn("Andrey Dumchin", text)
+        self.assertIn("4X5VA", text)
+        self.assertIn("Credits", text)
+        for name, _what, _url in CREDITS:
+            self.assertIn(name, text)
+
+
 class LibraryWindowTests(AppTestCase):
     def test_rebuild_asks_before_forgetting_missing_captures(self):
         from catcap import ui
