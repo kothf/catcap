@@ -47,6 +47,7 @@ class Tray:
         self.login.setCheckable(True)
         self.login.toggled.connect(self._toggle_login)
         menu.addAction(t.icon("settings"), "Settings", self.app.show_settings)
+        menu.addAction("About CatCap", self.app.show_about)
         menu.addAction("Quit CatCap", self.app.quit)
         menu.aboutToShow.connect(self._refresh)
         return menu

@@ -47,7 +47,7 @@ then installs PyQt6 with pip for your user.
 
 ```bash
 ./packaging/build-deb.sh                          # creates dist/catcap_<version>_all.deb
-sudo apt install ./dist/catcap_0.2.3_all.deb      # then start “CatCap” from the Mint menu
+sudo apt install ./dist/catcap_0.2.4_all.deb      # then start “CatCap” from the Mint menu
 ```
 
 GitHub Actions also builds the package on every push (download it from the run's
@@ -91,6 +91,12 @@ Built with Python 3 and Qt 6 (PyQt6). Code layout: `catcap/capture/` (X11 and po
 `hotkeys.py`, `tray.py`, `app.py` (CLI and workflow).
 
 To give Print Screen back to Cinnamon (for example before uninstalling), run `catcap --release-hotkeys`.
+
+## Credits
+
+Created by [Andrey](https://github.com/kothf). Built on Qt 6 and PyQt6, python-xlib, xdg-desktop-portal
+and SQLite, with development help from [Claude Code](https://claude.com/claude-code) by Anthropic.
+The same credits are shown in the app under **About CatCap**.
 
 ## Licence
 

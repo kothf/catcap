@@ -391,8 +391,13 @@ class CatCap:
         self._keep.append(show_shortcuts(parent))
 
     def show_about(self, parent=None):
+        from . import AUTHOR, AUTHOR_URL, CREDITS
+
+        credits = "".join(f"<li><a href='{url}'>{name}</a>: {what}</li>" for name, what, url in CREDITS)
         QMessageBox.about(parent, "About CatCap",
                           f"<h3>CatCap {__version__}</h3><p>Capture, annotate and organise screenshots on Linux Mint.</p>"
+                          f"<p>Created by <a href='{AUTHOR_URL}'>{AUTHOR}</a>.</p>"
+                          f"<p><b>Credits</b></p><ul>{credits}</ul>"
                           "<p>MIT licence · <a href='https://github.com/kothf/catcap'>github.com/kothf/catcap</a></p>")
 
     def update_autostart(self):
