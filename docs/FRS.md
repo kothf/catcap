@@ -4,9 +4,9 @@
 |---|---|
 | Product | CatCap — screenshot capture, annotation and library app |
 | Target platform | Linux Mint 21.x / 22.x (Cinnamon edition first; MATE and Xfce best-effort) |
-| Document version | 0.1 (draft) |
+| Document version | 0.2 (draft) |
 | Date | 2026-11-24 |
-| Status | For review |
+| Status | For review — open questions resolved (see §12) |
 
 ---
 
@@ -60,14 +60,15 @@ CatCap is a standalone native desktop app. It runs as a **tray/background proces
 
 ### 2.3 Operating environment
 - Linux Mint 21.x and 22.x, x86_64.
-- Display server: **X11 (primary, Mint's default)**. **Wayland (Cinnamon experimental session)** is supported through `xdg-desktop-portal` with reduced features (see §8.3).
+- Display server: **both X11 (Mint's default) and Wayland (Cinnamon Wayland session) are supported from v1.0**. On Wayland, capture goes through `xdg-desktop-portal`; see §8.3 for the per-feature behaviour.
 - Multi-monitor setups with mixed DPI and scaling (100%, 125%, 150%, 200%).
 
 ### 2.4 Design and implementation constraints
 - Must integrate with the Cinnamon panel tray (XApp StatusIcon / AppIndicator).
 - Must follow freedesktop.org standards: XDG base directories, `.desktop` file, icon theme, MIME types.
 - Must work offline. No telemetry by default.
-- Suggested stack (not binding): **Python 3 + GTK 3 (PyGObject)** to match Mint/XApp look-and-feel, with **SQLite** for the library and **Pillow/Cairo** for imaging. Alternatives: Rust + GTK4, or C++ + Qt6.
+- Technology stack (decided): **Python 3 + GTK 3 (PyGObject)** to match the Mint/XApp look-and-feel, with **SQLite** for the library and **Pillow/Cairo** for imaging. Wayland capture uses the `xdg-desktop-portal` D-Bus API (via `Gio.DBusProxy` or `dbus-next`).
+- Licence: **MIT**.
 
 ### 2.5 Assumptions and dependencies
 - The `xdg-desktop-portal` Screenshot interface is available on Wayland.
@@ -196,9 +197,9 @@ CatCap is a standalone native desktop app. It runs as a **tray/background proces
 
 | ID | Requirement | Priority |
 |---|---|---|
-| LIB-01 | **Every capture is automatically saved to the library** (unless the user discards it), including the original, the annotation data and a rendered preview. | M |
+| LIB-01 | **Every capture is automatically saved to the library** (unless the user discards it), including the original, the annotation data and a thumbnail. | M |
 | LIB-02 | Library location defaults to `~/Pictures/CatCap/` (images) and `$XDG_DATA_HOME/catcap/` (database). Both are configurable. | M |
-| LIB-03 | Storage format: the original as PNG, annotations as JSON (versioned schema), and a thumbnail cache in `$XDG_CACHE_HOME/catcap/`. | M |
+| LIB-03 | Storage format: the original as PNG, annotations as JSON (versioned schema), and a thumbnail cache in `$XDG_CACHE_HOME/catcap/`. **Rendered (flattened) images are not stored in the library.** They are generated on demand for copy, export, drag-and-drop, pin and print; temporary files for drag-and-drop go to `$XDG_RUNTIME_DIR/catcap/` and are deleted when no longer needed. Thumbnails show the image with its annotations. | M |
 | LIB-04 | Metadata per capture: ID, created date/time, capture mode, dimensions, file size, source **application name and window title** (where available), monitor, tags, collections, favourite flag, notes, OCR text. | M |
 | LIB-05 | A library rebuild/repair command that rescans the image folder and restores database records. | S |
 | LIB-06 | Move the library to a new location, with migration of the files. | S |
@@ -294,6 +295,7 @@ CatCap is a standalone native desktop app. It runs as a **tray/background proces
 | NFR-P3 | Library open with 10,000 captures: first thumbnails in **≤ 1 s**; scrolling at 60 fps. |
 | NFR-P4 | Search results update in **≤ 200 ms** for 10,000 items (excluding OCR indexing). |
 | NFR-P5 | Idle tray process memory **≤ 80 MB**. |
+| NFR-P6 | On-demand render of a 4K capture with annotations (for copy, export or drag) in **≤ 300 ms**. |
 
 ### 8.2 Reliability and data safety
 - NFR-R1: Database writes are transactional (SQLite WAL). A crash must not corrupt the library.
@@ -303,7 +305,21 @@ CatCap is a standalone native desktop app. It runs as a **tray/background proces
 
 ### 8.3 Compatibility
 - NFR-C1: Full feature set on X11 (Cinnamon, MATE, Xfce).
-- NFR-C2: On Wayland, capture goes through `xdg-desktop-portal`. Window hover-highlighting, frozen-screen overlay, source-app metadata and global hotkeys may be limited; the UI must clearly explain any unavailable mode instead of failing silently.
+- NFR-C2: **Wayland is supported in v1.0** (Cinnamon Wayland session, plus any desktop with `xdg-desktop-portal`). Display-server detection happens at runtime; one build serves both.
+
+| Feature | X11 | Wayland (v1.0) |
+|---|---|---|
+| Full screen / monitor | Native (XGetImage/XComposite) | Portal Screenshot, non-interactive |
+| Region + frozen overlay, magnifier | Native | Portal full-screen grab, then CatCap's own full-screen overlay for selection (same UX) |
+| Window capture | Hover-highlight + click | Portal interactive window picker |
+| Active window | Native | Portal interactive picker (no silent capture) |
+| Scrolling capture | Auto-scroll via XTest | Manual-scroll stitching (CAP-11) only |
+| Global hotkeys | Native key grab | `GlobalShortcuts` portal where available; otherwise CatCap registers its CLI commands as Cinnamon custom shortcuts |
+| Source app / window title metadata | Yes | Not available (left empty) |
+| Exclude windows from capture (NFR-S3) | Yes | Not available |
+
+- NFR-C2a: Where a Wayland limitation applies, the UI must say so (for example a note in the mode menu) instead of failing silently.
+- NFR-C2b: Portal permission prompts are handled gracefully; if the user denies permission, CatCap shows how to grant it.
 - NFR-C3: HiDPI: captures are saved at native pixel resolution; the UI scales correctly.
 - NFR-C4: Multi-monitor with different resolutions and scale factors, including negative coordinates.
 
@@ -322,7 +338,7 @@ CatCap is a standalone native desktop app. It runs as a **tray/background proces
 - NFR-D1: `.deb` package installable on Mint 21/22 with declared dependencies.
 - NFR-D2: Flatpak (Flathub) build.
 - NFR-D3: Appears in the Mint menu with an icon. Registers as a handler for opening images ("Open with CatCap").
-- NFR-D4: Licence: to be decided (suggest GPL-3.0 or MIT).
+- NFR-D4: Licence: **MIT**.
 
 ---
 
@@ -363,7 +379,7 @@ CatCap is a standalone native desktop app. It runs as a **tray/background proces
 
 ## 11. Acceptance criteria (v1.0 release gate)
 
-1. All **M** requirements are implemented and pass manual test scripts on Linux Mint 22 Cinnamon (X11), at 1× and 2× scale, with single and dual monitors.
+1. All **M** requirements are implemented and pass manual test scripts on Linux Mint 22 Cinnamon in **both X11 and Wayland sessions** (with the Wayland differences in §8.3), at 1× and 2× scale, with single and dual monitors.
 2. Every capture mode produces a library entry with correct metadata.
 3. Annotations survive save, app restart and reopen, and can still be edited.
 4. Exported images with blur or pixelate contain no recoverable original pixels in the blurred area.
@@ -372,9 +388,11 @@ CatCap is a standalone native desktop app. It runs as a **tray/background proces
 
 ---
 
-## 12. Open questions
+## 12. Decisions (resolved open questions)
 
-1. Stack choice: Python + GTK3 (fastest to build, native Mint look) or Rust + GTK4 (performance, longer-term)?
-2. Should the library store rendered PNGs next to originals (bigger disk use, easy external access) or render on demand only?
-3. Is Wayland support needed for v1, or is X11-only acceptable at launch?
-4. Licence: open source (GPL-3.0 / MIT) or proprietary?
+| # | Question | Decision |
+|---|---|---|
+| 1 | Technology stack | **Python 3 + GTK 3 (PyGObject)**. |
+| 2 | Store rendered PNGs next to originals? | **No.** Render on demand only (LIB-03, NFR-P6). |
+| 3 | Wayland in v1? | **Yes.** v1.0 runs on both X11 and Wayland (§2.3, §8.3). |
+| 4 | Licence | **MIT**. |
