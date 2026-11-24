@@ -26,7 +26,6 @@ ignore = [
     "SIM105",  # contextlib.suppress is not clearer than try/except/pass here
     "SIM108",  # ternaries everywhere hurt readability
     "UP037",   # quoted annotations are harmless with `from __future__ import annotations`
-    "UP038",   # isinstance(x, (A, B)) is fine (rule removed in newer ruff)
 ]
 
 [tool.ruff.lint.per-file-ignores]
