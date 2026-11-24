@@ -28,6 +28,11 @@ region, middle-click to open the library, right-click for every capture type, re
 “Copy last capture” and “Start at login”. Closing the library keeps it running in the tray.
 It starts at login by default (untick it in the welcome dialog, the tray menu or Settings).
 
+After you select a region, a tool column next to it lets you draw straight on the frozen screen,
+like Flameshot: pen, line, arrow, rectangle, ellipse, marker, text, numbered steps, blur, pixelate and
+redact, with a colour button, undo/redo (Ctrl+Z) and the mouse wheel for thickness. What you draw is
+saved as normal annotations, so you can still change it later in the editor.
+
 Global hotkeys (Print Screen and friends) are switched on in the welcome dialog or in
 **Settings › Hotkeys**. On Cinnamon they are registered as Cinnamon custom shortcuts, so they
 also work in the Wayland session.

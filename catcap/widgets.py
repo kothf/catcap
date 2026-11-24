@@ -222,7 +222,10 @@ SHORTCUTS = [
         ("Arrow keys", "Move the pointer or selection by 1 px (Shift: 10 px)"),
         ("Ctrl + arrows", "Resize the selection"), ("Enter, double-click", "Capture"),
         ("F, Ctrl+A", "Select the whole screen"), ("C", "Copy the colour under the pointer"),
-        ("M", "Show or hide the magnifier"), ("Esc, right-click", "Cancel")]),
+        ("M", "Show or hide the magnifier"), ("Esc, right-click", "Cancel"),
+        ("Tool column", "Draw on the selection: pen, arrow, shapes, text, steps, blur, redact"),
+        ("Mouse wheel (drawing)", "Thickness"), ("Ctrl+Z, Ctrl+Shift+Z", "Undo, redo a drawing"),
+        ("Esc (drawing)", "Leave the drawing tool")]),
     ("Editor", [
         ("V A L R E T O H P S B X K G C", "Select, arrow, line, rectangle, ellipse, text, callout, highlighter, "
                                           "pen, step, blur, pixelate, redact, spotlight, crop"),

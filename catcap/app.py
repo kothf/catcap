@@ -245,7 +245,7 @@ class CatCap:
             self.config.set("state", "last_region", f"{x + offset[0]},{y + offset[1]},{w},{h}")
             info = type("Info", (), {"app": result.app, "title": result.title})()
             chosen = {"copy": "clipboard", "edit": "editor", "pin": "pin"}.get(result.action)
-            self._store(result.image, result.mode, info, chosen or action)
+            self._store(result.image, result.mode, info, chosen or action, items=result.items)
 
         for part_snap, offset, screen in parts:
             overlay = Overlay(part_snap, mode, self.config, lambda r, o=offset: finished(r, o), screen)
@@ -255,9 +255,14 @@ class CatCap:
         for overlay in overlays:
             overlay.start()
 
-    def _store(self, image, mode, info, action, monitor=""):
+    def _store(self, image, mode, info, action, monitor="", items=None):
         cid = self.library.add_capture(image, mode=mode, app=getattr(info, "app", "") if info else "",
                                        title=getattr(info, "title", "") if info else "", monitor=monitor)
+        if items:
+            # Drawn in the overlay: kept as editable annotations over the untouched original.
+            from .annotations import Document
+
+            self.library.save_doc(cid, Document(items=items))
         self._play_sound()
         action = action or self.config.get("capture", "after_action")
         self._end_capture(restore=action != "editor")

@@ -20,7 +20,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import QColor, QImage
+from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QFileDialog
 
 APP = QApplication.instance() or QApplication([])
@@ -189,6 +191,77 @@ class CaptureFlowTests(AppTestCase):
         spin(100)
         self.assertFalse(self.app._capturing)
         self.assertEqual(self.lib.count(), 0)
+
+
+class OverlayDrawingTests(AppTestCase):
+    def open_overlay(self, action="library"):
+        from catcap.capture import Snapshot
+        from catcap.overlay import Overlay
+
+        snap = Snapshot(image=image(800, 600, "#ffffff"), scale=1.0, backend="wayland",
+                        monitors=[("A", 0, 0, 800, 600)])
+        self.app._capturing = True
+        self.app._open_overlay(snap, "region", action)
+        overlay = next(k for k in self.app._keep if isinstance(k, Overlay))
+        spin(80)
+        overlay.sel, overlay.state = [100, 100, 300, 200], "selected"
+        return overlay
+
+    def drag(self, overlay, a, b, mods=Qt.KeyboardModifier.NoModifier):
+        QTest.mousePress(overlay, Qt.MouseButton.LeftButton, mods, QPoint(*a))
+        QTest.mouseMove(overlay, QPoint((a[0] + b[0]) // 2, (a[1] + b[1]) // 2))
+        QTest.mouseMove(overlay, QPoint(*b))
+        QTest.mouseRelease(overlay, Qt.MouseButton.LeftButton, mods, QPoint(*b))
+
+    def test_draw_type_undo_and_capture_keeps_editable_annotations(self):
+        ov = self.open_overlay()
+        ov.repaint()
+        ov._pick_tool("rect")
+        self.drag(ov, (120, 120), (200, 180))
+        ov._pick_tool("arrow")
+        self.drag(ov, (210, 130), (300, 250))
+        ov._pick_tool("step")
+        QTest.mouseClick(ov, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(350, 150))
+        ov._pick_tool("text")
+        QTest.mouseClick(ov, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(130, 250))
+        QTest.keyClicks(ov, "Hi")
+        QTest.keyClick(ov, Qt.Key.Key_Return)
+        self.assertEqual([i["type"] for i in ov.items], ["rect", "arrow", "step", "text"])
+        ov._pick_tool("pen")
+        self.drag(ov, (150, 200), (250, 220))
+        ov._undo()
+        self.assertEqual(len(ov.items), 4)
+        ov._redo()
+        ov._undo()
+        QTest.mouseClick(ov, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, QPoint(0, 0))  # pen dot: ignored
+        ov.repaint()   # paints the tool column and live items without errors
+        ov._finish(ov.sel)
+        spin(200)
+        from catcap.library import Query
+
+        cap = self.lib.query(Query())[0]
+        self.assertEqual((cap.width, cap.height), (300, 200))
+        doc = self.lib.load_doc(cap.id)
+        self.assertEqual([i["type"] for i in doc.items], ["rect", "arrow", "step", "text"])
+        rect = doc.items[0]
+        self.assertEqual((rect["x"], rect["y"], rect["w"], rect["h"]), (20, 20, 80, 60))
+        self.assertEqual(doc.items[3]["text"], "Hi")
+        # the original stays clean; the rendered capture carries the drawing
+        from catcap import render
+
+        self.assertEqual(render.load_original(self.lib.original_path(cap.id)).pixelColor(20, 20).name(), "#ffffff")
+        self.assertNotEqual(render.render_capture(self.lib, cap.id).pixelColor(20, 20).name(), "#ffffff")
+
+    def test_escape_leaves_tool_then_cancels_and_wheel_sets_thickness(self):
+        ov = self.open_overlay()
+        ov._pick_tool("line")
+        ov.wheelEvent(type("Wheel", (), {"angleDelta": lambda self: QPoint(0, 120)})())
+        self.assertEqual(ov.width, 5)
+        QTest.keyClick(ov, Qt.Key.Key_Escape)
+        self.assertEqual(ov.tool, "select")
+        self.assertFalse(ov._done)
+        QTest.keyClick(ov, Qt.Key.Key_Escape)
+        self.assertTrue(ov._done)
 
 
 class ForwardTests(unittest.TestCase):

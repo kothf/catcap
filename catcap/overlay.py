@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import math
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QWidget
 
+from . import annotations as ann
+from . import render
 from .capture import Snapshot, WindowInfo
+from .editor_tools import DEFAULT_STYLES, SWATCHES
 from .theme import ACCENT, draw_brackets, svg_pixmap
 
 HANDLE = 10        # logical px hit radius
@@ -16,11 +20,18 @@ MIN_DRAG = 4
 CHROME = QColor(30, 33, 37, 235)
 ACTIONS = [("capture", "Capture", "check"), ("copy", "Copy", "copy"), ("edit", "Edit", "edit"),
            ("pin", "Pin", "pin"), ("cancel", "", "close")]
+# Flameshot-style drawing tools shown beside the selection. "select" adjusts the area.
+DRAW_TOOLS = [("select", "Move or resize the area"), ("pen", "Pen"), ("line", "Line"), ("arrow", "Arrow"),
+              ("rect", "Rectangle"), ("ellipse", "Ellipse"), ("highlighter", "Marker"), ("text", "Text"),
+              ("step", "Numbered step"), ("blur", "Blur"), ("pixelate", "Pixelate"), ("redact", "Redact")]
+KEEP_OWN_COLOR = {"highlighter", "redact", "blur", "pixelate"}
+TOOL_BTN = 34
 
 
 class SelectionResult:
-    def __init__(self, image, rect, app="", title="", action=None, mode="region"):
+    def __init__(self, image, rect, app="", title="", action=None, mode="region", items=None):
         self.image, self.rect, self.app, self.title, self.action, self.mode = image, rect, app, title, action, mode
+        self.items = items or []   # annotations drawn in the overlay, in the image's own coordinates
 
 
 class Overlay(QWidget):
@@ -60,6 +71,17 @@ class Overlay(QWidget):
         self.toast = ""
         self._done = False
         self._screen = screen
+        # drawing on the frozen screen
+        self.tool = "select"
+        self.items: list[dict] = []
+        self.undone: list[dict] = []
+        self.active: dict | None = None      # item being drawn
+        self.typing: dict | None = None      # text item receiving keystrokes
+        self.color = SWATCHES[0]
+        self.width = 4
+        self.tool_rects: list = []
+        self.hover_tool = None
+        self.rendered = self.image
         if snap.backend == "x11":
             ox, oy = snap.origin
             self.setGeometry(QRect(ox, oy, round(self.iw / self.s), round(self.ih / self.s)))
@@ -107,10 +129,16 @@ class Overlay(QWidget):
         w, h = min(w, self.iw - x), min(h, self.ih - y)
         if w < 1 or h < 1:
             return
+        self._commit_text()
         image = self.image.copy(x, y, w, h)
         info = window or self.snap.window_at(x + w / 2, y + h / 2) or self.snap.active
+        items = []
+        for item in self.items:
+            item = copy.deepcopy(item)
+            ann.move_item(item, -x, -y)
+            items.append(item)
         result = SelectionResult(image, (x, y, w, h), info.app if info else "", info.title if info else "",
-                                 action, "window" if window is not None else self.mode)
+                                 action, "window" if window is not None else self.mode, items)
         self._close()
         QTimer.singleShot(60, lambda: self.on_done(result))
 
@@ -175,8 +203,11 @@ class Overlay(QWidget):
             self._resize_to(ix, iy)
         elif self.state == "idle" and self.snap_windows:
             self.hover = self.snap.window_at(ix, iy)
+        elif self.state == "annotating" and self.active is not None:
+            self._extend_item(ix, iy, bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier))
         elif self.state == "selected":
             self.hover_action = self._action_at(pos.x(), pos.y())
+            self.hover_tool = self._tool_at(pos.x(), pos.y())
             self._update_cursor(pos)
         self.update()
 
@@ -185,9 +216,13 @@ class Overlay(QWidget):
                   "ne": Qt.CursorShape.SizeBDiagCursor, "sw": Qt.CursorShape.SizeBDiagCursor,
                   "n": Qt.CursorShape.SizeVerCursor, "s": Qt.CursorShape.SizeVerCursor,
                   "e": Qt.CursorShape.SizeHorCursor, "w": Qt.CursorShape.SizeHorCursor}
-        handle = self._handle_at(pos.x(), pos.y())
-        if self.hover_action:
+        handle = self._handle_at(pos.x(), pos.y()) if self.tool == "select" else None
+        if self.hover_action or self.hover_tool:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
+        elif self.tool == "text":
+            self.setCursor(Qt.CursorShape.IBeamCursor)
+        elif self.tool != "select":
+            self.setCursor(Qt.CursorShape.CrossCursor)
         elif handle:
             self.setCursor(shapes[handle])
         elif self._inside(*self._img(pos)):
@@ -226,6 +261,13 @@ class Overlay(QWidget):
                 else:
                     self._finish(self.sel, None if action == "capture" else action, self.chosen)
                 return
+            tool = self._tool_at(pos.x(), pos.y())
+            if tool:
+                self._pick_tool(tool)
+                return
+            if self.tool != "select":
+                self._start_item(ix, iy)
+                return
             handle = self._handle_at(pos.x(), pos.y())
             if handle:
                 self.state, self.handle, self.drag_sel = "resizing", handle, list(self.sel)
@@ -237,6 +279,8 @@ class Overlay(QWidget):
         self.update()
 
     def mouseDoubleClickEvent(self, ev):
+        if self.tool != "select":
+            return
         if self.sel and self._inside(*self._img(ev.position())):
             self._finish(self.sel, None, self.chosen)
 
@@ -255,15 +299,183 @@ class Overlay(QWidget):
                 self.state = "selected"
         elif self.state in ("moving", "resizing"):
             self.state = "selected"
+        elif self.state == "annotating":
+            self.state = "selected"
+            item, self.active = self.active, None
+            if item is not None and self._big_enough(item):
+                self._add_item(item)
         self.update()
+
+    def wheelEvent(self, ev):
+        # Like Flameshot: the wheel sets the thickness of the current tool.
+        if self.state != "selected" or self.tool in ("select", "text"):
+            return
+        step = 1 if ev.angleDelta().y() > 0 else -1
+        self.width = max(1, min(60, self.width + step))
+        self.toast = f"Thickness {self.width}"
+        QTimer.singleShot(900, self._clear_toast)
+        self.update()
+
+    # ------------------------------------------------------------ drawing tools
+    def _pick_tool(self, tool):
+        self._commit_text()
+        if tool == "color":
+            self.color = SWATCHES[(SWATCHES.index(self.color) + 1) % len(SWATCHES)] if self.color in SWATCHES \
+                else SWATCHES[0]
+        elif tool == "undo":
+            self._undo()
+        elif tool == "redo":
+            self._redo()
+        else:
+            self.tool = tool
+            if tool != "select":
+                self.width = DEFAULT_STYLES.get(tool, {}).get("width", 4)
+        self.update()
+
+    def _style(self, kind):
+        style = copy.deepcopy(DEFAULT_STYLES.get(kind, {}))
+        if "color" in style and kind not in KEEP_OWN_COLOR:
+            style["color"] = self.color
+        if "width" in style:
+            style["width"] = self.width
+        if kind == "step":
+            style["size"] = max(20, 34 + (self.width - 4) * 3)
+        if kind in ("blur", "pixelate"):
+            style["strength"] = max(6, self.width * 3)
+        return style
+
+    def _start_item(self, ix, iy):
+        kind = self.tool
+        style = self._style(kind)
+        if kind == "text":
+            self._commit_text()
+            self.typing = {"type": "text", "x": ix, "y": iy, "text": "", **style}
+            self.typing["font_size"] = max(12, self.typing.get("font_size", 22)) * self.s
+            self.update()
+            return
+        if kind == "step":
+            item = {"type": "step", "x": ix, "y": iy, **style}
+            item["size"] = item.get("size", 34) * self.s
+            item["n"] = 1 + sum(1 for i in self.items if i["type"] == "step")
+            self._add_item(item)
+            return
+        if kind in ann.LINE_KINDS:
+            item = {"type": kind, "x1": ix, "y1": iy, "x2": ix, "y2": iy, **style}
+        elif kind in ann.PATH_KINDS:
+            item = {"type": kind, "points": [[ix, iy]], **style}
+        else:
+            item = {"type": kind, "x": ix, "y": iy, "w": 0, "h": 0, **style}
+        if "width" in item:
+            item["width"] = item["width"] * self.s
+        item["_start"] = (ix, iy)
+        self.active = item
+        self.state = "annotating"
+
+    def _extend_item(self, ix, iy, shift):
+        item = self.active
+        sx, sy = item["_start"]
+        kind = item["type"]
+        if kind in ann.LINE_KINDS:
+            if shift:   # 45° steps
+                angle = round(math.atan2(iy - sy, ix - sx) / (math.pi / 4)) * (math.pi / 4)
+                dist = math.hypot(ix - sx, iy - sy)
+                ix, iy = sx + dist * math.cos(angle), sy + dist * math.sin(angle)
+            item["x2"], item["y2"] = ix, iy
+        elif kind in ann.PATH_KINDS:
+            last = item["points"][-1]
+            if math.hypot(ix - last[0], iy - last[1]) >= 2 * self.s:
+                item["points"].append([ix, iy])
+        else:
+            if shift:   # squares and circles
+                side = max(abs(ix - sx), abs(iy - sy))
+                ix = sx + side * (1 if ix >= sx else -1)
+                iy = sy + side * (1 if iy >= sy else -1)
+            item.update(dict(zip("xywh", ann._norm_rect(sx, sy, ix, iy), strict=True)))
+
+    def _big_enough(self, item):
+        if item["type"] in ann.LINE_KINDS:
+            return math.hypot(item["x2"] - item["x1"], item["y2"] - item["y1"]) >= 3
+        if item["type"] in ann.RECT_KINDS:
+            return item["w"] >= 3 and item["h"] >= 3
+        if item["type"] in ann.PATH_KINDS:
+            return len(item["points"]) > 1
+        return True
+
+    def _add_item(self, item):
+        item.pop("_start", None)
+        self.items.append(item)
+        self.undone.clear()
+        self._rerender()
+
+    def _undo(self):
+        if self.typing is not None:
+            self.typing = None
+        elif self.items:
+            self.undone.append(self.items.pop())
+            self._rerender()
+
+    def _redo(self):
+        if self.undone:
+            self.items.append(self.undone.pop())
+            self._rerender()
+
+    def _rerender(self):
+        if not self.items:
+            self.rendered = self.image
+        else:
+            image = self.image.copy()
+            render.draw_items(image, self.items)
+            self.rendered = image
+        self.update()
+
+    def _commit_text(self):
+        item, self.typing = self.typing, None
+        if item is not None and item["text"].strip():
+            render.measure_text(item)
+            self._add_item(item)
+
+    def _type_key(self, ev) -> bool:
+        """Feed a key to the text being typed. True when the key was used."""
+        if self.typing is None:
+            return False
+        key = ev.key()
+        if key == Qt.Key.Key_Escape:
+            self.typing = None
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            if ev.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.typing["text"] += "\n"
+            else:
+                self._commit_text()
+        elif key == Qt.Key.Key_Backspace:
+            self.typing["text"] = self.typing["text"][:-1]
+        elif ev.text() and ev.text().isprintable():
+            self.typing["text"] += ev.text()
+        else:
+            return False
+        self.update()
+        return True
+
+    def _tool_at(self, lx, ly):
+        for name, rect in self.tool_rects:
+            if rect.contains(QPointF(lx, ly)):
+                return name
+        return None
 
     # ------------------------------------------------------------ keyboard
     def keyPressEvent(self, ev):
+        if self._type_key(ev):
+            return
         key = ev.key()
         mods = ev.modifiers()
         shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
         ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
-        if key == Qt.Key.Key_Escape:
+        if ctrl and key == Qt.Key.Key_Z and self.state == "selected":
+            self._redo() if shift else self._undo()
+        elif ctrl and key == Qt.Key.Key_Y and self.state == "selected":
+            self._redo()
+        elif key == Qt.Key.Key_Escape and self.tool != "select" and self.state == "selected":
+            self.tool = "select"     # first Esc leaves the drawing tool, the next one cancels
+        elif key == Qt.Key.Key_Escape:
             self._cancel()
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             if self.sel:
@@ -305,7 +517,7 @@ class Overlay(QWidget):
     def paintEvent(self, _ev):
         p = QPainter(self)
         lw, lh = self.iw / self.s, self.ih / self.s
-        p.drawImage(QRectF(0, 0, lw, lh), self.image)
+        p.drawImage(QRectF(0, 0, lw, lh), self.rendered)
         hole = None
         if self.sel:
             hole = self.sel
@@ -341,10 +553,13 @@ class Overlay(QWidget):
                 if len(name) == 1:
                     p.drawRoundedRect(QRectF(hx - 7, hy - 2.5, 14, 5) if name in "ns" else
                                       QRectF(hx - 2.5, hy - 7, 5, 14), 2.5, 2.5)
-        if self.state == "selected":
+        self._draw_live_items(p)
+        if self.state in ("selected", "annotating"):
             self._draw_actions(p)
+            self._draw_tools(p)
         else:
             self.action_rects = []
+            self.tool_rects = []
         if self.magnifier and self.state in ("idle", "drawing", "resizing"):
             self._draw_magnifier(p, px, py, lw, lh)
         hints = {
@@ -352,8 +567,12 @@ class Overlay(QWidget):
             "window": "Click a window to capture it    Enter takes the highlighted one    Esc cancels",
         }
         hint = hints.get(self.mode, hints["region"])
-        if self.state == "selected":
-            hint = "Drag edges to adjust    Arrows move, Ctrl+arrows resize    Enter captures    Esc cancels"
+        if self.typing is not None:
+            hint = "Type the text    Shift+Enter new line    Enter or click elsewhere to finish    Esc drops it"
+        elif self.state in ("selected", "annotating") and self.tool != "select":
+            hint = "Draw on the capture    Scroll for thickness    Shift for straight lines    Ctrl+Z undo    Enter captures"
+        elif self.state == "selected":
+            hint = "Drag edges to adjust    Pick a tool on the side to draw    Enter captures    Esc cancels"
         self._pill(p, self.toast or hint, None, 16, center=lw)
         p.end()
 
@@ -409,6 +628,72 @@ class Overlay(QWidget):
                 p.drawPixmap(QPointF(rect.center().x() - 8, rect.center().y() - 8), pm)
             self.action_rects.append((name, rect))
             cx += w + gap
+
+    def _draw_live_items(self, p: QPainter):
+        live = [i for i in (self.active, self.typing) if i is not None]
+        if not live:
+            return
+        p.save()
+        p.scale(1 / self.s, 1 / self.s)
+        for item in live:
+            if item["type"] in ann.EFFECT_KINDS:
+                p.setPen(QPen(QColor(255, 255, 255, 220), 1.5 * self.s, Qt.PenStyle.DashLine))
+                p.setBrush(QColor(0, 0, 0, 90) if item["type"] == "redact" else Qt.BrushStyle.NoBrush)
+                p.drawRect(QRectF(item["x"], item["y"], item["w"], item["h"]))
+            elif item is self.typing:
+                shown = dict(item, text=item["text"] + "▏")
+                render.measure_text(shown)
+                render.draw_item(p, shown)
+            else:
+                render.draw_item(p, item)
+        p.restore()
+
+    def _draw_tools(self, p: QPainter):
+        """Vertical tool column beside the selection (right side, or left when there is no room)."""
+        r = self._lsel()
+        lw, lh = self.iw / self.s, self.ih / self.s
+        entries = [n for n, _l in DRAW_TOOLS] + ["color", "undo", "redo"]
+        b, gap = TOOL_BTN, 3
+        col_h = len(entries) * (b + gap) + 9
+        x = r.right() + 12
+        if x + b + 12 > lw:
+            x = r.left() - b - 24
+        if x < 6:
+            x = max(6, r.right() - b - 18)
+        y = min(max(6, r.top()), lh - col_h - 6)
+        p.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        p.setBrush(CHROME)
+        p.drawRoundedRect(QRectF(x, y, b + 12, col_h), 14, 14)
+        self.tool_rects = []
+        cy = y + 6
+        for name in entries:
+            rect = QRectF(x + 6, cy, b, b)
+            if name == self.tool:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(ACCENT))
+                p.drawRoundedRect(rect, 9, 9)
+            elif self.hover_tool == name:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(255, 255, 255, 28))
+                p.drawRoundedRect(rect, 9, 9)
+            if name == "color":
+                p.setPen(QPen(QColor(255, 255, 255), 2))
+                p.setBrush(QColor(self.color))
+                p.drawEllipse(rect.center(), 9, 9)
+            else:
+                enabled = not ((name == "undo" and not self.items) or (name == "redo" and not self.undone))
+                pm = svg_pixmap(name, "#FFFFFF" if enabled else "#6B7278", 18)
+                p.drawPixmap(QPointF(rect.center().x() - 9, rect.center().y() - 9), pm)
+            self.tool_rects.append((name, rect))
+            cy += b + gap
+        if self.hover_tool:
+            label = dict(DRAW_TOOLS).get(self.hover_tool) or {"color": "Colour (click for the next one)",
+                                                              "undo": "Undo (Ctrl+Z)",
+                                                              "redo": "Redo (Ctrl+Shift+Z)"}[self.hover_tool]
+            hr = dict(self.tool_rects)[self.hover_tool]
+            fm = QFontMetricsF(self.font())
+            tx = hr.right() + 14 if x > r.right() else hr.left() - fm.horizontalAdvance(label) - 40
+            self._pill(p, label, max(4, tx), hr.top() + 4)
 
     def _draw_magnifier(self, p: QPainter, px, py, lw, lh):
         size = 128
