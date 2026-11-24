@@ -1,7 +1,7 @@
 [project]
 name = "catcap"
 dynamic = ["version"]
-description = "Screenshot capture, annotation and library app for Linux Mint"
+description = "Screenshot capture, annotation and library app for Linux desktops"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"

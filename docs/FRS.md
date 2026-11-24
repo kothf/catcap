@@ -3,7 +3,7 @@
 | Item | Value |
 |---|---|
 | Product | CatCap — screenshot capture, annotation and library app |
-| Target platform | Linux Mint 22.x and newer (Cinnamon edition first; MATE and Xfce best-effort). Mint 21.x works from source with PyQt6 from pip. |
+| Target platform | Linux desktops with Qt 6. Primary target: Linux Mint 22.x and newer (Cinnamon first); other desktops (GNOME, KDE Plasma, MATE, Xfce) and distributions are supported, with manual hotkey binding. Older releases (Mint 21.x) work from source with PyQt6 from pip. |
 | Document version | 0.3 (draft) |
 | Date | 2026-11-24 |
 | Status | For review — open questions resolved (see §12) |

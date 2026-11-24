@@ -1,4 +1,4 @@
-"""CatCap: screenshot capture, annotation and library app for Linux Mint."""
+"""CatCap: screenshot capture, annotation and library app for Linux desktops."""
 
 __version__ = "0.2.4"
 APP_ID = "io.github.kothf.CatCap"

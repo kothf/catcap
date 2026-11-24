@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the system packages CatCap needs to run from this folder (Linux Mint 21/22, Ubuntu 22.04+).
+# Install the system packages CatCap needs to run from this folder (Debian/Ubuntu family: Linux Mint 21+, Ubuntu 22.04+, Debian 12+).
 set -euo pipefail
 
 required=(python3 python3-xlib xdg-utils libglib2.0-bin)

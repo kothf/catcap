@@ -1,7 +1,8 @@
 # CatCap
 
-Screenshot capture, annotation and library app for Linux Mint (images only, no video).
-Works on X11 and Wayland.
+Screenshot capture, annotation and library app for Linux desktops (images only, no video).
+Works on X11 and Wayland. Developed and tested on Linux Mint (Cinnamon); other desktops such as
+GNOME, KDE Plasma, Xfce and MATE work too, with hotkeys bound by hand (see below).
 
 - [Functional Requirements Specification](docs/FRS.md)
 - [What is implemented so far](docs/STATUS.md)
@@ -37,17 +38,24 @@ Global hotkeys (Print Screen and friends) are switched on in the welcome dialog 
 **Settings › Hotkeys**. On Cinnamon they are registered as Cinnamon custom shortcuts, so they
 also work in the Wayland session.
 
-## Which Linux Mint?
+## Which Linux?
 
-The `.deb` package is for **Linux Mint 22 or newer** (Ubuntu 24.04 base), which ships PyQt6.
-Linux Mint 21 has no PyQt6 package: run CatCap from this folder instead; `./install-deps.sh`
-then installs PyQt6 with pip for your user.
+CatCap needs Python 3.10+ and Qt 6 (PyQt6), so it runs on any current Linux desktop.
+
+- **The `.deb` package** suits Debian-based systems that ship PyQt6: Linux Mint 22+, Ubuntu 24.04+,
+  Debian 13+ and their relatives.
+- **Older releases** (Linux Mint 21, Ubuntu 22.04) have no PyQt6 package: run CatCap from this folder
+  instead; `./install-deps.sh` then installs PyQt6 with pip for your user.
+- **Other distributions** (Fedora, Arch, openSUSE…): install PyQt6 (with its SVG module) and
+  python-xlib from your package manager, then run `./run-catcap`.
+- **Hotkeys** are set up automatically on Cinnamon. On other desktops, bind the commands shown in
+  **Settings › Hotkeys** (for example `catcap --region` to Print Screen) in your desktop's keyboard settings.
 
 ## Install as a .deb package
 
 ```bash
 ./packaging/build-deb.sh                          # creates dist/catcap_<version>_all.deb
-sudo apt install ./dist/catcap_0.2.4_all.deb      # then start “CatCap” from the Mint menu
+sudo apt install ./dist/catcap_0.2.4_all.deb      # then start “CatCap” from the app menu
 ```
 
 GitHub Actions also builds the package on every push (download it from the run's
