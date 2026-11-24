@@ -23,6 +23,11 @@ Useful commands:
 ./run-catcap --help            # all options
 ```
 
+CatCap lives in the panel tray, like other screenshot tools: left-click the icon to capture a
+region, middle-click to open the library, right-click for every capture type, recent captures,
+“Copy last capture” and “Start at login”. Closing the library keeps it running in the tray.
+It starts at login by default (untick it in the welcome dialog, the tray menu or Settings).
+
 Global hotkeys (Print Screen and friends) are switched on in the welcome dialog or in
 **Settings › Hotkeys**. On Cinnamon they are registered as Cinnamon custom shortcuts, so they
 also work in the Wayland session.
@@ -31,7 +36,7 @@ also work in the Wayland session.
 
 ```bash
 ./packaging/build-deb.sh                          # creates dist/catcap_<version>_all.deb
-sudo apt install ./dist/catcap_0.2.0_all.deb      # then start “CatCap” from the Mint menu
+sudo apt install ./dist/catcap_0.2.1_all.deb      # then start “CatCap” from the Mint menu
 ```
 
 GitHub Actions also builds the package on every push (download it from the run's

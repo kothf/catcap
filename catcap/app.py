@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shutil
@@ -13,7 +12,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtDBus import QDBusConnection, QDBusMessage
 from PyQt6.QtGui import QGuiApplication, QIcon
-from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtNetwork import QLocalServer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from . import APP_ID, APP_NAME, __version__, paths, ui
@@ -23,38 +22,6 @@ from .library import Library
 from .theme import Theme
 
 CAPTURE_FLAGS = ["region", "window", "full", "active", "monitor", "last_region"]
-
-
-def parse_args(argv):
-    p = argparse.ArgumentParser(prog="catcap", description="Capture, annotate and organise screenshots.")
-    g = p.add_argument_group("capture")
-    g.add_argument("--region", action="store_true", help="capture a region or window")
-    g.add_argument("--window", action="store_true", help="capture a window")
-    g.add_argument("--full", action="store_true", help="capture the whole screen (all monitors)")
-    g.add_argument("--monitor", action="store_true", help="capture the monitor under the pointer")
-    g.add_argument("--active", action="store_true", help="capture the active window")
-    g.add_argument("--last-region", dest="last_region", action="store_true", help="capture the last region again")
-    g.add_argument("-d", "--delay", type=int, help="wait N seconds before capturing")
-    g.add_argument("--cursor", dest="cursor", action="store_true", default=None, help="include the mouse pointer")
-    g.add_argument("--no-cursor", dest="cursor", action="store_false", help="leave the mouse pointer out")
-    a = p.add_argument_group("after capture")
-    a.add_argument("--clipboard", action="store_true", help="copy to the clipboard")
-    a.add_argument("--edit", action="store_true", help="open in the editor")
-    a.add_argument("--save-only", dest="save_only", action="store_true", help="only save to the library")
-    o = p.add_argument_group("other")
-    o.add_argument("--library", action="store_true", help="open the library")
-    o.add_argument("--settings", action="store_true", help="open settings")
-    o.add_argument("--background", action="store_true", help="start in the tray without opening a window")
-    o.add_argument("--release-hotkeys", dest="release_hotkeys", action="store_true",
-                   help="remove CatCap's shortcuts and give Print Screen back to Cinnamon, then exit")
-    o.add_argument("--quit", action="store_true", help="quit the running CatCap")
-    o.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
-    p.add_argument("files", nargs="*", help="image files to open in the editor")
-    return p.parse_args(argv)
-
-
-def socket_name() -> str:
-    return f"catcap-{os.getuid()}"
 
 
 def icon_file() -> str:
@@ -90,6 +57,10 @@ class CatCap:
             from .tray import Tray
 
             self.tray = Tray(self)
+        if self.tray is None or not self.tray.available():
+            # Without a tray there is nothing to come back to: quit with the last window.
+            qapp.setQuitOnLastWindowClosed(True)
+        self.update_autostart()
         self.library_window = None
         self.settings_window = None
         self.editors: dict = {}
@@ -303,11 +274,27 @@ class CatCap:
             self.library_window = LibraryWindow(self)
             self.library_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             self.library_window.destroyed.connect(lambda *_: setattr(self, "library_window", None))
+            self.library_window.closing.connect(self._library_closing)
         self.library_window.show()
         self.library_window.raise_()
         self.library_window.activateWindow()
         if select_id:
             QTimer.singleShot(200, lambda: self.library_window and self.library_window.select_capture(select_id))
+
+    def _library_closing(self):
+        if self.tray is None or not self.tray.available() or self.config.get("general", "tray_hint_shown"):
+            return
+        self.config.set("general", "tray_hint_shown", True)
+        self.tray.message("CatCap is still running",
+                          "It stays in the panel tray. Click the icon to capture, right-click for more.")
+
+    def copy_last(self):
+        from .library import Query
+
+        caps = self.library.query(Query())
+        if caps:
+            ui.copy_capture(self.library, caps[0].id)
+            self.notify("Copied to the clipboard", caps[0].name)
 
     def open_editor(self, capture_id: str):
         from .editor import Editor
@@ -382,30 +369,14 @@ class CatCap:
             ui.error(self.library_window, "Hotkeys need attention", "\n".join(warnings))
 
 
-def _forward(payload: bytes) -> bool:
-    sock = QLocalSocket()
-    sock.connectToServer(socket_name())
-    if not sock.waitForConnected(400):
-        return False
-    sock.write(payload)
-    sock.flush()
-    sock.waitForBytesWritten(1000)
-    sock.disconnectFromServer()
-    return True
+def run(args) -> int:
+    """Start the CatCap instance (tray process) and handle the first command."""
+    from .cli import socket_path
 
-
-def main(argv=None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    args = parse_args(argv)
-    payload = json.dumps({"args": vars(args), "cwd": os.getcwd()}).encode()
     QApplication.setApplicationName(APP_NAME)
     QApplication.setDesktopFileName(APP_ID)
     qapp = QApplication([sys.argv[0]])
     qapp.setQuitOnLastWindowClosed(False)
-    if _forward(payload):
-        return 0
-    if args.quit:
-        return 0
     if args.release_hotkeys:
         from .hotkeys import HotkeyManager
 
@@ -415,27 +386,39 @@ def main(argv=None) -> int:
         print("CatCap hotkeys removed; Cinnamon's screenshot keys are restored.")
         return 0
     app = CatCap(qapp)
+    path = socket_path()
+    QLocalServer.removeServer(path)
     server = QLocalServer()
-    QLocalServer.removeServer(socket_name())
     server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
-    server.listen(socket_name())
+    if not server.listen(path):
+        print(f"catcap: cannot listen on {path}: {server.errorString()}", file=sys.stderr)
 
     def on_connection():
         conn = server.nextPendingConnection()
+        buf = bytearray()
 
         def read():
-            if not conn.canReadLine() and conn.bytesAvailable() == 0:
+            buf.extend(bytes(conn.readAll()))
+            if not buf.endswith(b"\n"):
                 return
-            data = bytes(conn.readAll())
             try:
-                msg = json.loads(data.decode())
-                app.handle(msg.get("args", {}), msg.get("cwd", str(Path.home())))
+                msg = json.loads(buf.decode())
             except ValueError:
-                pass
+                return
+            conn.write(b"ok\n")
+            conn.flush()
+            QTimer.singleShot(0, lambda: app.handle(msg.get("args", {}), msg.get("cwd", str(Path.home()))))
 
         conn.readyRead.connect(read)
         conn.disconnected.connect(conn.deleteLater)
 
     server.newConnection.connect(on_connection)
+    qapp.aboutToQuit.connect(lambda: QLocalServer.removeServer(path))
     QTimer.singleShot(0, lambda: app.handle(vars(args), os.getcwd()))
     return qapp.exec()
+
+
+def main(argv=None) -> int:
+    from .cli import main as cli_main
+
+    return cli_main(argv)

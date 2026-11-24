@@ -25,8 +25,8 @@ Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 | OPT-04 | ✅ | Sound + notification toggles |
 | OPT-05/06 Presets | ⬜ | |
 | TRG-01/02 Hotkeys, Print Screen | ✅ | Cinnamon custom shortcuts (X11 + Wayland), Print takeover with restore (`catcap --release-hotkeys`), conflict warnings. Other desktops: bind the shown commands manually |
-| TRG-03 Tray | ✅ | Qt system tray (StatusNotifierItem / XEmbed) |
-| TRG-04 CLI | ✅ | `catcap --help` |
+| TRG-03 Tray | ✅ | Runs in the tray (StatusNotifierItem / XEmbed): left-click captures, menu with all capture types, recent captures, copy last, start at login. Hotkeys reach the running instance in about 40 ms |
+| TRG-04 CLI | ✅ | `catcap --help`; forwarded to the running instance without starting Qt |
 | TRG-05 D-Bus API | ⬜ | |
 
 ## Editor

@@ -22,7 +22,7 @@ cat > "$STAGE/usr/bin/catcap" <<'LAUNCH'
 #!/usr/bin/python3
 import sys
 sys.path.insert(0, "/usr/lib/catcap")
-from catcap.app import main
+from catcap.cli import main
 sys.exit(main())
 LAUNCH
 chmod 0755 "$STAGE/usr/bin/catcap"

@@ -17,7 +17,8 @@ from . import paths
 
 DEFAULTS: dict[str, dict] = {
     "general": {
-        "start_at_login": False,
+        "start_at_login": True,
+        "tray_hint_shown": False,
         "notifications": True,
         "sound": False,
         "first_run_done": False,

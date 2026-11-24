@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 from PyQt6.QtCore import (QAbstractListModel, QItemSelectionModel, QModelIndex, QRectF, QSize, QStringListModel, Qt,
-                          QTimer)
+                          QTimer, pyqtSignal)
 from PyQt6.QtGui import (QColor, QFont, QGuiApplication, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
                          QShortcut, QStandardItem, QStandardItemModel)
 from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QCompleter, QFileDialog, QFormLayout, QFrame,
@@ -227,6 +227,8 @@ class TagCompleter(QCompleter):
 
 # ====================================================================== window
 class LibraryWindow(QMainWindow):
+    closing = pyqtSignal()
+
     def __init__(self, app):
         super().__init__()
         self.app = app
@@ -1157,3 +1159,7 @@ class LibraryWindow(QMainWindow):
                  if u.isLocalFile() and ui.is_image_path(u.toLocalFile())]
         if files:
             self.import_paths(files)
+
+    def closeEvent(self, ev):
+        self.closing.emit()
+        super().closeEvent(ev)

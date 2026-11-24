@@ -15,16 +15,6 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 os.environ.setdefault("CATCAP_LAUNCHER", os.path.join(HERE, "run-catcap"))
 
-try:
-    from PyQt6 import QtSvg, QtWidgets  # noqa: F401
-except ImportError as exc:
-    sys.stderr.write(
-        f"CatCap cannot start: {exc}\n"
-        "Install the required packages with:\n"
-        f"    {os.path.join(HERE, 'install-deps.sh')}\n"
-    )
-    sys.exit(1)
-
-from catcap.app import main  # noqa: E402
+from catcap.cli import main  # noqa: E402
 
 sys.exit(main())
