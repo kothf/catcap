@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import QMimeData, Qt, QUrl
-from PyQt6.QtDBus import QDBusConnection, QDBusMessage, QDBusPendingCallWatcher
+from PyQt6.QtDBus import QDBusConnection, QDBusMessage, QDBusPendingCallWatcher, QDBusPendingReply
 from PyQt6.QtGui import QDesktopServices, QGuiApplication
 from PyQt6.QtWidgets import QApplication, QFileDialog, QInputDialog, QLineEdit, QMenu, QMessageBox, QProgressDialog
 
@@ -171,7 +171,7 @@ def export_dialog(parent, library, config, ids: list[str]) -> None:
     if len(ids) == 1:
         cap = library.get(ids[0])
         filters = [f"{render.EXPORT_FORMATS[k][0]} (*{render.EXPORT_FORMATS[k][1]})" for k in formats]
-        default_filter = next((f for f, k in zip(filters, formats) if k == fmt), filters[0])
+        default_filter = next((f for f, k in zip(filters, formats, strict=True) if k == fmt), filters[0])
         suggested = os.path.join(last_dir, format_filename(template, cap) + render.EXPORT_FORMATS.get(fmt, ("", ".png"))[1])
         path, chosen = QFileDialog.getSaveFileName(parent, "Export capture", suggested, ";;".join(filters), default_filter)
         if not path:
@@ -242,7 +242,7 @@ def show_in_folder(path: Path) -> None:
 
     def finished(w):
         _pending.discard(w)
-        if w.isError():
+        if QDBusPendingReply(w).isError():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
         w.deleteLater()
 

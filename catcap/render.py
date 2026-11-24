@@ -421,7 +421,7 @@ def save_pdf(images, path) -> Path:
     writer.setResolution(96)
     writer.setCreator("CatCap")
     painter = None
-    for i, image in enumerate(images):
+    for image in images:
         size = QPageSize(QSizeF(image.width() * 72 / 96, image.height() * 72 / 96), QPageSize.Unit.Point)
         writer.setPageSize(size)
         writer.setPageMargins(QMarginsF(0, 0, 0, 0))

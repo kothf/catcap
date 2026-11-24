@@ -550,9 +550,12 @@ class Editor(QMainWindow):
                           ("Flip horizontally", lambda: self.image_op("flip_h")),
                           ("Flip vertically", lambda: self.image_op("flip_v")),
                           ("Resize image…", self.resize_dialog), (None, None),
-                          ("Export as PDF…", lambda: (self._flush_save(), ui.export_pdf_dialog(self, self.library, self.config, [self.capture_id]))),
+                          ("Export as PDF…", lambda: (self._flush_save(),
+                                                       ui.export_pdf_dialog(self, self.library, self.config,
+                                                                            [self.capture_id]))),
                           ("Send by email…", lambda: ui.send_email(self._temp())),
-                          ("Show original in file manager", lambda: ui.show_in_folder(self.library.original_path(self.capture_id))),
+                          ("Show original in file manager",
+                           lambda: ui.show_in_folder(self.library.original_path(self.capture_id))),
                           (None, None),
                           ("Revert to original", self.revert),
                           ("Keyboard shortcuts", lambda: self.app.show_shortcuts(self))):
@@ -604,7 +607,7 @@ class Editor(QMainWindow):
             QTimer.singleShot(0, self.zoom_fit)
         elif name != "select":
             self.selected = None
-        self.tool_label.setText(dict((t, l) for t, l, _k in TOOLS)[name])
+        self.tool_label.setText({t: label for t, label, _k in TOOLS}[name])
         self.hint.setText(HINTS.get(name, ""))
         self._load_props(self.styles.get(name, {}))
         self._sync_props()
@@ -620,7 +623,7 @@ class Editor(QMainWindow):
         self.image_ops.setVisible(kind == "select" or self.tool == "crop")
         self.hint.setVisible(not wanted or kind in ("select", "crop"))
         if self.tool == "select" and self.selected:
-            self.tool_label.setText(dict((t, l) for t, l, _k in TOOLS).get(kind, kind))
+            self.tool_label.setText({t: label for t, label, _k in TOOLS}.get(kind, kind))
         QTimer.singleShot(0, self._place_panels)
 
     def _load_props(self, style: dict):
@@ -922,7 +925,7 @@ class Editor(QMainWindow):
                 self.active["x2"], self.active["y2"] = self._constrain(sx, sy, x, y, shift, kind)
             elif kind in ann.RECT_KINDS:
                 ex, ey = self._constrain(sx, sy, x, y, shift, kind)
-                self.active.update(dict(zip("xywh", ann._norm_rect(sx, sy, ex, ey))))
+                self.active.update(dict(zip("xywh", ann._norm_rect(sx, sy, ex, ey), strict=True)))
             elif kind in ann.PATH_KINDS:
                 last = self.active["points"][-1]
                 if math.hypot(x - last[0], y - last[1]) * self.zoom >= 2:

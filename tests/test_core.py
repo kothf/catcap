@@ -133,6 +133,38 @@ class LibraryTests(TempHome):
         lib.db.commit()
         self.assertEqual(lib.rebuild(), (1, []))
 
+    def test_search_treats_percent_and_underscore_literally(self):
+        from catcap.library import Query
+
+        lib = self.make()
+        a = lib.add_capture(self.pixbuf(), name="50% off")
+        lib.add_capture(self.pixbuf(), name="500 items")
+        b = lib.add_capture(self.pixbuf(), name="snake_case")
+        lib.add_capture(self.pixbuf(), name="snakeXcase")
+        self.assertEqual([c.id for c in lib.query(Query(search="50%"))], [a])
+        self.assertEqual([c.id for c in lib.query(Query(search="e_c"))], [b])
+
+    def test_schema_migrations_run_and_newer_db_is_refused(self):
+        from catcap import library as libmod
+
+        lib = self.make()
+        self.assertEqual(lib.schema_version(), libmod.SCHEMA_VERSION)
+        lib.close()
+        old = (libmod.SCHEMA_VERSION, dict(libmod.MIGRATIONS))
+        try:
+            libmod.SCHEMA_VERSION = old[0] + 1
+            libmod.MIGRATIONS[old[0]] = ["ALTER TABLE captures ADD COLUMN extra TEXT NOT NULL DEFAULT ''"]
+            lib = self.make()
+            self.assertEqual(lib.schema_version(), old[0] + 1)
+            cols = [r[1] for r in lib.db.execute("PRAGMA table_info(captures)")]
+            self.assertIn("extra", cols)
+            lib.close()
+            libmod.SCHEMA_VERSION, libmod.MIGRATIONS = old[0], dict(old[1])
+            with self.assertRaises(libmod.NewerLibraryError):
+                self.make()
+        finally:
+            libmod.SCHEMA_VERSION, libmod.MIGRATIONS = old[0], dict(old[1])
+
     def test_rebuild_keeps_captures_whose_files_are_missing(self):
         lib = self.make()
         a = lib.add_capture(self.pixbuf())

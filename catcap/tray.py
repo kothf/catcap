@@ -28,9 +28,12 @@ class Tray:
     def _menu(self) -> QMenu:
         t = self.app.theme
         menu = QMenu()
-        for mode, label, glyph in (("region", "Capture region or window", "capture"), ("window", "Capture window", "window"),
-                                   ("full", "Capture full screen", "screen"), ("monitor", "Capture this monitor", "screen"),
-                                   ("active", "Capture active window", "window"), ("last_region", "Repeat last region", "repeat")):
+        for mode, label, glyph in (("region", "Capture region or window", "capture"),
+                                   ("window", "Capture window", "window"),
+                                   ("full", "Capture full screen", "screen"),
+                                   ("monitor", "Capture this monitor", "screen"),
+                                   ("active", "Capture active window", "window"),
+                                   ("last_region", "Repeat last region", "repeat")):
             menu.addAction(t.icon(glyph), label, lambda m=mode: self.app.start_capture(m))
         delay = menu.addMenu(t.icon("timer"), "Capture after a delay")
         for seconds in (3, 5, 10):

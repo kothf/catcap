@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtDBus import QDBusConnection, QDBusMessage, QDBusPendingCallWatcher
+from PyQt6.QtDBus import QDBusConnection, QDBusMessage, QDBusPendingCallWatcher, QDBusPendingReply
 from PyQt6.QtGui import QGuiApplication, QIcon
 from PyQt6.QtNetwork import QLocalServer
 from PyQt6.QtWidgets import QApplication, QMessageBox
@@ -287,7 +287,7 @@ class CatCap:
         def finished(w):
             if w in self._keep:
                 self._keep.remove(w)
-            if w.isError() and not (self.tray and self.tray.message(title, body)) and error:
+            if QDBusPendingReply(w).isError() and not (self.tray and self.tray.message(title, body)) and error:
                 ui.error(None, title, body)
             w.deleteLater()
 
@@ -412,7 +412,14 @@ def run(args) -> int:
         HotkeyManager(config).remove()
         print("CatCap hotkeys removed; Cinnamon's screenshot keys are restored.")
         return 0
-    app = CatCap(qapp)
+    from .library import NewerLibraryError
+
+    try:
+        app = CatCap(qapp)
+    except NewerLibraryError as exc:
+        print(f"catcap: {exc}", file=sys.stderr)
+        ui.error(None, "CatCap is too old for this library", str(exc))
+        return 1
     path = socket_path()
     QLocalServer.removeServer(path)
     server = QLocalServer()

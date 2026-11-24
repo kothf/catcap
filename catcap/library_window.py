@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from PyQt6.QtCore import (QAbstractListModel, QItemSelectionModel, QModelIndex, QRectF, QSize, QStringListModel, Qt,
+from PyQt6.QtCore import (QAbstractListModel, QItemSelectionModel, QRectF, QSize, QStringListModel, Qt,
                           QTimer, pyqtSignal)
 from PyQt6.QtGui import (QColor, QFont, QGuiApplication, QImage, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
                          QShortcut, QStandardItem, QStandardItemModel)
@@ -56,8 +56,8 @@ class CaptureModel(QAbstractListModel):
         self.caps = caps
         self.endResetModel()
 
-    def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self.caps)
+    def rowCount(self, parent=None):
+        return 0 if parent is not None and parent.isValid() else len(self.caps)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():

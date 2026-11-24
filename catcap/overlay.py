@@ -390,7 +390,7 @@ class Overlay(QWidget):
         p.drawRoundedRect(QRectF(bx, by, bw, bh), 14, 14)
         cx = bx + 6
         self.action_rects = []
-        for (name, label, icon), w in zip(ACTIONS, widths):
+        for (name, label, icon), w in zip(ACTIONS, widths, strict=True):
             rect = QRectF(cx, by + 5, w, bh - 10)
             if name == "capture":
                 p.setPen(Qt.PenStyle.NoPen)

@@ -217,8 +217,8 @@ def draw_brackets(painter: QPainter, rect: QRectF, color: QColor, length: float 
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    l, t, r, b = rect.left(), rect.top(), rect.right(), rect.bottom()
-    for (x, y, dx, dy) in ((l, t, 1, 1), (r, t, -1, 1), (r, b, -1, -1), (l, b, 1, -1)):
+    left, t, r, b = rect.left(), rect.top(), rect.right(), rect.bottom()
+    for (x, y, dx, dy) in ((left, t, 1, 1), (r, t, -1, 1), (r, b, -1, -1), (left, b, 1, -1)):
         path = QPainterPath(QPointF(x, y + dy * length))
         path.lineTo(QPointF(x, y))
         path.lineTo(QPointF(x + dx * length, y))
