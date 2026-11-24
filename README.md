@@ -53,6 +53,15 @@ CatCap needs Python 3.10+ and Qt 6 (PyQt6), so it runs on any current Linux desk
 
 ## Install as a .deb package
 
+**Download:** get the latest `catcap_<version>_all.deb` from the
+[Releases page](https://github.com/kothf/catcap/releases/latest), then install it:
+
+```bash
+cd ~/Downloads && sudo apt install ./catcap_*_all.deb   # then start “CatCap” from the app menu
+```
+
+Or build it yourself from this folder:
+
 ```bash
 ./packaging/build-deb.sh                          # creates dist/catcap_<version>_all.deb
 sudo apt install ./dist/catcap_0.2.4_all.deb      # then start “CatCap” from the app menu
