@@ -1,4 +1,4 @@
-"""Wayland capture through org.freedesktop.portal.Screenshot."""
+"""Wayland capture through org.freedesktop.portal.Screenshot (Qt D-Bus)."""
 
 from __future__ import annotations
 
@@ -6,30 +6,30 @@ import os
 import random
 import string
 
-import gi
+from PyQt6.QtCore import QObject, QUrl, pyqtSlot
+from PyQt6.QtDBus import (QDBusConnection, QDBusMessage, QDBusPendingCall, QDBusPendingCallWatcher,
+                           QDBusPendingReply)
+from PyQt6.QtGui import QGuiApplication, QImage
 
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import GdkPixbuf, Gio, GLib  # noqa: E402
-
-from . import Snapshot, monitors_logical  # noqa: E402
+from . import Snapshot
 
 PORTAL_BUS = "org.freedesktop.portal.Desktop"
 PORTAL_PATH = "/org/freedesktop/portal/desktop"
 SCREENSHOT_IFACE = "org.freedesktop.portal.Screenshot"
 REQUEST_IFACE = "org.freedesktop.portal.Request"
+FMT = QImage.Format.Format_ARGB32_Premultiplied
 
 
-class PortalError(RuntimeError):
-    pass
-
-
-class PortalBackend:
+class PortalBackend(QObject):
     name = "wayland"
     window_hover = False
     silent_active_window = False
 
     def __init__(self):
-        self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        super().__init__()
+        self.bus = QDBusConnection.sessionBus()
+        self._pending: dict[str, object] = {}
+        self._watchers: list = []
 
     def snapshot(self, callback, include_cursor: bool = False) -> None:
         self._request(False, callback)
@@ -39,62 +39,72 @@ class PortalBackend:
         self._request(True, callback)
 
     def _request(self, interactive: bool, callback) -> None:
+        if not self.bus.isConnected():
+            callback(None, "No D-Bus session: screenshots on Wayland need xdg-desktop-portal.")
+            return
         token = "catcap_" + "".join(random.choices(string.ascii_lowercase, k=10))
-        sender = self.bus.get_unique_name()[1:].replace(".", "_")
+        sender = self.bus.baseService()[1:].replace(".", "_")
         handle = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
-        state = {"sub": 0}
+        self._pending[handle] = callback
+        self.bus.connect("", handle, REQUEST_IFACE, "Response", self._on_response)
+        msg = QDBusMessage.createMethodCall(PORTAL_BUS, PORTAL_PATH, SCREENSHOT_IFACE, "Screenshot")
+        msg.setArguments(["", {"handle_token": token, "interactive": interactive, "modal": False}])
+        call: QDBusPendingCall = self.bus.asyncCall(msg)
+        watcher = QDBusPendingCallWatcher(call, self)
+        self._watchers.append(watcher)
 
-        def on_response(_conn, _sender, _path, _iface, _signal, params):
-            self.bus.signal_unsubscribe(state["sub"])
-            response, results = params.unpack()
-            if response != 0:
-                callback(None, "cancelled" if response == 1 else "The screenshot portal refused the request.")
-                return
-            uri = results.get("uri", "")
-            try:
-                snap = self._load(uri)
-            except Exception as exc:
-                callback(None, str(exc))
-                return
-            callback(snap, None)
+        def finished(w):
+            self._watchers.remove(w)
+            reply = QDBusPendingReply(w)
+            if reply.isError():
+                cb = self._pending.pop(handle, None)
+                self.bus.disconnect("", handle, REQUEST_IFACE, "Response", self._on_response)
+                if cb:
+                    cb(None, "Screenshots need xdg-desktop-portal on Wayland (install xdg-desktop-portal-xapp "
+                             f"or -gtk). Details: {reply.error().message()}")
+            w.deleteLater()
 
-        state["sub"] = self.bus.signal_subscribe(
-            PORTAL_BUS, REQUEST_IFACE, "Response", handle, None,
-            Gio.DBusSignalFlags.NO_MATCH_RULE, on_response)
+        watcher.finished.connect(finished)
 
-        options = {
-            "handle_token": GLib.Variant("s", token),
-            "interactive": GLib.Variant("b", interactive),
-            "modal": GLib.Variant("b", False),
-        }
-
-        def on_called(bus, result):
-            try:
-                bus.call_finish(result)
-            except GLib.Error as exc:
-                self.bus.signal_unsubscribe(state["sub"])
-                callback(None, "Screenshots need xdg-desktop-portal on Wayland "
-                               f"(install xdg-desktop-portal-xapp or -gtk). Details: {exc.message}")
-
-        self.bus.call(PORTAL_BUS, PORTAL_PATH, SCREENSHOT_IFACE, "Screenshot",
-                      GLib.Variant("(sa{sv})", ("", options)), GLib.VariantType("(o)"),
-                      Gio.DBusCallFlags.NONE, -1, None, on_called)
+    @pyqtSlot(QDBusMessage)
+    def _on_response(self, message: QDBusMessage) -> None:
+        handle = message.path()
+        callback = self._pending.pop(handle, None)
+        self.bus.disconnect("", handle, REQUEST_IFACE, "Response", self._on_response)
+        if callback is None:
+            return
+        args = message.arguments()
+        response = int(args[0]) if args else 2
+        results = args[1] if len(args) > 1 else {}
+        if response != 0:
+            callback(None, "cancelled" if response == 1 else "The screenshot portal refused the request.")
+            return
+        try:
+            callback(self._load(str(results.get("uri", ""))), None)
+        except Exception as exc:
+            callback(None, str(exc))
 
     @staticmethod
     def _load(uri: str) -> Snapshot:
-        path = Gio.File.new_for_uri(uri).get_path()
+        path = QUrl(uri).toLocalFile()
         if not path:
-            raise PortalError("portal returned no file")
-        pixbuf = GdkPixbuf.Pixbuf.new_from_file(path)
+            raise RuntimeError("portal returned no file")
+        image = QImage(path)
+        if image.isNull():
+            raise RuntimeError(f"could not read {path}")
+        image = image.convertToFormat(FMT)
         try:  # the portal may drop the file into ~/Pictures; CatCap keeps its own copy
             os.unlink(path)
         except OSError:
             pass
-        mons = monitors_logical()
-        min_x = min((m[1] for m in mons), default=0)
-        max_x = max((m[1] + m[3] for m in mons), default=pixbuf.get_width())
-        min_y = min((m[2] for m in mons), default=0)
-        scale = pixbuf.get_width() / max(1, max_x - min_x)
-        monitors = [(n, round((x - min_x) * scale), round((y - min_y) * scale),
-                     round(w * scale), round(h * scale)) for n, x, y, w, h in mons]
-        return Snapshot(pixbuf=pixbuf, scale=scale, monitors=monitors, backend="wayland")
+        screens = QGuiApplication.screens() if QGuiApplication.instance() else []
+        if screens:
+            virtual = screens[0].virtualGeometry()
+            scale = image.width() / max(1, virtual.width())
+            monitors = [(s.name() or "Monitor", round((s.geometry().x() - virtual.x()) * scale),
+                         round((s.geometry().y() - virtual.y()) * scale), round(s.geometry().width() * scale),
+                         round(s.geometry().height() * scale)) for s in screens]
+            origin = (virtual.x(), virtual.y())
+        else:
+            scale, monitors, origin = 1.0, [("Monitor", 0, 0, image.width(), image.height())], (0, 0)
+        return Snapshot(image=image, scale=scale, origin=origin, monitors=monitors, backend="wayland")

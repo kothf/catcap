@@ -1,274 +1,324 @@
-"""Small windows: pin-to-screen, quick toolbar, delay countdown, shortcuts help."""
+"""Small windows: pin-to-screen, post-capture quick bar, delay countdown, shortcuts help, welcome."""
 
 from __future__ import annotations
 
-import cairo
-import gi
+from PyQt6.QtCore import QPoint, QRectF, Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QMenu,
+                             QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
-
-from . import render, ui  # noqa: E402
-from .capture import is_wayland  # noqa: E402
+from . import render, ui
+from .theme import ACCENT, draw_brackets
 
 
-class PinWindow(Gtk.Window):
-    """Always-on-top borderless image (OUT-08). Scroll to zoom, drag to move, Esc to close."""
+class PinWindow(QWidget):
+    """Always-on-top borderless image (OUT-08). Scroll to zoom, drag to move, Esc or double-click to close."""
 
-    def __init__(self, app, surface: cairo.ImageSurface):
-        super().__init__(title="CatCap pin")
-        self.app = app
-        self.surface = surface
-        self.set_decorated(False)
-        self.set_keep_above(True)
-        self.set_skip_taskbar_hint(False)
-        self.set_icon_name("io.github.kothf.CatCap")
-        mon = Gdk.Display.get_default().get_monitor(0).get_workarea()
-        self.scale = min(1.0, mon.width * 0.6 / surface.get_width(), mon.height * 0.6 / surface.get_height())
-        self.area = Gtk.DrawingArea()
-        self.area.connect("draw", self._draw)
-        self.add(self.area)
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.KEY_PRESS_MASK)
-        self.connect("button-press-event", self._press)
-        self.connect("scroll-event", self._scroll)
-        self.connect("key-press-event", self._key)
-        self.set_tooltip_text("Drag to move · scroll to zoom · double-click or Esc to close · right-click for menu")
+    def __init__(self, app, image):
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setWindowTitle("CatCap pin")
+        self.image = image
+        geo = self.screen().availableGeometry()
+        self.scale = min(1.0, geo.width() * 0.6 / image.width(), geo.height() * 0.6 / image.height())
+        self._drag = None
+        self.setToolTip("Drag to move. Scroll to zoom. Double-click or Esc to close.")
         self._resize()
-        self.show_all()
 
     def _resize(self):
-        self.resize(max(24, int(self.surface.get_width() * self.scale) + 2),
-                    max(24, int(self.surface.get_height() * self.scale) + 2))
-        self.area.queue_draw()
+        self.resize(int(self.image.width() * self.scale) + 6, int(self.image.height() * self.scale) + 6)
+        self.update()
 
-    def _draw(self, _w, cr):
-        cr.set_source_rgb(0.35, 0.6, 0.95)
-        cr.paint()
-        cr.translate(1, 1)
-        cr.scale(self.scale, self.scale)
-        cr.set_source_surface(self.surface, 0, 0)
-        cr.get_source().set_filter(cairo.FILTER_GOOD)
-        cr.paint()
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        r = QRectF(3, 3, self.width() - 6, self.height() - 6)
+        p.setPen(QPen(QColor(ACCENT), 3))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawImage(r, self.image)
+        p.drawRoundedRect(r.adjusted(-1.5, -1.5, 1.5, 1.5), 3, 3)
 
-    def _press(self, _w, ev):
-        if ev.type == Gdk.EventType._2BUTTON_PRESS:
-            self.destroy()
-        elif ev.button == 1:
-            self.begin_move_drag(ev.button, int(ev.x_root), int(ev.y_root), ev.time)
-        elif ev.button == 3:
-            menu = Gtk.Menu()
-            for label, cb in (("Copy", lambda: ui.copy_surface(self.surface)),
-                              ("Actual size", lambda: self._set_scale(1.0)),
-                              ("Opacity 100%", lambda: self.set_opacity(1.0)),
-                              ("Opacity 70%", lambda: self.set_opacity(0.7)),
-                              ("Opacity 40%", lambda: self.set_opacity(0.4)),
-                              ("Close", self.destroy)):
-                item = Gtk.MenuItem(label=label)
-                item.connect("activate", lambda _i, c=cb: c())
-                menu.append(item)
-            menu.show_all()
-            menu.attach_to_widget(self, None)
-            menu.popup_at_pointer(ev)
-        return True
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._drag = ev.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
-    def _set_scale(self, s):
-        self.scale = max(0.05, min(s, 8.0))
+    def mouseMoveEvent(self, ev):
+        if self._drag is not None:
+            self.move(ev.globalPosition().toPoint() - self._drag)
+
+    def mouseReleaseEvent(self, _ev):
+        self._drag = None
+
+    def mouseDoubleClickEvent(self, _ev):
+        self.close()
+
+    def wheelEvent(self, ev):
+        self.scale = max(0.05, min(8.0, self.scale * (1.1 if ev.angleDelta().y() > 0 else 1 / 1.1)))
         self._resize()
 
-    def _scroll(self, _w, ev):
-        ok, _dx, dy = ev.get_scroll_deltas()
-        up = (dy < 0) if ok and dy else ev.direction == Gdk.ScrollDirection.UP
-        self._set_scale(self.scale * (1.1 if up else 1 / 1.1))
-        return True
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key.Key_Escape:
+            self.close()
 
-    def _key(self, _w, ev):
-        if ev.keyval == Gdk.KEY_Escape:
-            self.destroy()
-        return True
+    def contextMenuEvent(self, ev):
+        menu = QMenu(self)
+        menu.addAction("Copy", lambda: ui.copy_image(self.image))
+        menu.addAction("Actual size", lambda: (setattr(self, "scale", 1.0), self._resize()))
+        opacity = menu.addMenu("Opacity")
+        for v in (100, 75, 50):
+            opacity.addAction(f"{v}%", lambda v=v: self.setWindowOpacity(v / 100))
+        menu.addSeparator()
+        menu.addAction("Close", self.close)
+        menu.exec(ev.globalPos())
 
 
-class QuickBar(Gtk.Window):
-    """Post-capture toolbar (OVL-08): Copy, Edit, Pin, Library, Discard. Closes after a few seconds."""
+class QuickBar(QWidget):
+    """Post-capture toolbar (OVL-08): Copy, Edit, Pin, Library, Delete. Fades out after a few seconds."""
 
-    TIMEOUT = 8
+    TIMEOUT_MS = 8000
 
     def __init__(self, app, capture_id: str):
-        super().__init__(type=Gtk.WindowType.TOPLEVEL, title="CatCap")
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool | Qt.WindowType.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.app = app
         self.capture_id = capture_id
-        self.set_decorated(False)
-        self.set_keep_above(True)
-        self.set_skip_taskbar_hint(True)
-        self.set_skip_pager_hint(True)
-        self.set_accept_focus(False)
-        self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
-        self._hover = False
-        self._timer = 0
-        box = Gtk.Box(spacing=8)
-        box.get_style_context().add_class("catcap-quickbar")
+        frame = QFrame(self)
+        frame.setObjectName("quickbar")
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(frame)
+        row = QHBoxLayout(frame)
+        row.setContentsMargins(10, 10, 10, 10)
+        row.setSpacing(8)
         cap = app.library.get(capture_id)
-        try:
-            thumb = render.render_thumbnail(app.library, capture_id, 72)
-            box.add(Gtk.Image.new_from_pixbuf(thumb))
-        except Exception:
-            pass
-        text = Gtk.Label(label=f"Saved · {cap.width} × {cap.height}", xalign=0)
-        text.get_style_context().add_class("catcap-quickbar-text")
-        box.add(text)
-        for label, cb, suggested in (("Copy", self._copy, True), ("Edit", self._edit, False),
-                                     ("Pin", self._pin, False), ("Library", self._library, False),
-                                     ("Discard", self._discard, False)):
-            btn = Gtk.Button(label=label)
-            if suggested:
-                btn.get_style_context().add_class("suggested-action")
-            if label == "Discard":
-                btn.set_tooltip_text("Delete this capture")
-            btn.connect("clicked", lambda _b, c=cb: c())
-            box.add(btn)
-        close = Gtk.Button(image=Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON),
-                           relief=Gtk.ReliefStyle.NONE)
-        close.connect("clicked", lambda *_: self.destroy())
-        box.add(close)
-        ev = Gtk.EventBox()
-        ev.add(box)
-        ev.connect("enter-notify-event", lambda *_: self._set_hover(True))
-        ev.connect("leave-notify-event", lambda *_: self._set_hover(False))
-        self.add(ev)
-        self.show_all()
-        GLib.idle_add(self._place)
-        self._timer = GLib.timeout_add_seconds(self.TIMEOUT, self._expire)
-        self.connect("destroy", lambda *_: self._timer and GLib.source_remove(self._timer))
+        thumb = QLabel()
+        pm = QPixmap.fromImage(render.render_thumbnail(app.library, capture_id, 200).scaledToHeight(
+            112, Qt.TransformationMode.SmoothTransformation))
+        pm.setDevicePixelRatio(2)
+        thumb.setPixmap(pm)
+        row.addWidget(thumb)
+        text = QLabel(f"<b>Saved to library</b><br><span style='color:#8E959C'>{cap.width} × {cap.height}</span>")
+        row.addWidget(text)
+        row.addSpacing(6)
+        for label, icon, cb, accent in (("Copy", "copy", self._copy, True), ("Edit", "edit", self._edit, False),
+                                        ("Pin", "pin", self._pin, False), ("Library", "images", self._library, False)):
+            b = QPushButton(" " + label)
+            b.setIcon(app.theme.icon(icon, "#FFFFFF", 16))
+            if accent:
+                b.setProperty("accent", True)
+            b.clicked.connect(cb)
+            row.addWidget(b)
+        delete = QToolButton()
+        delete.setIcon(app.theme.icon("trash", "#E9ECEA", 18))
+        delete.setToolTip("Delete this capture")
+        delete.setStyleSheet("QToolButton { background: transparent; } QToolButton:hover { background: #3D4248; }")
+        delete.clicked.connect(self._delete)
+        row.addWidget(delete)
+        close = QToolButton()
+        close.setIcon(app.theme.icon("close", "#8E959C", 16))
+        close.setToolTip("Close")
+        close.setStyleSheet(delete.styleSheet())
+        close.clicked.connect(self.close)
+        row.addWidget(close)
+        self.adjustSize()
+        area = QGuiApplication.primaryScreen().availableGeometry()
+        self.move(area.right() - self.width() - 24, area.bottom() - self.height() - 24)
+        self._timer = QTimer(self, singleShot=True, interval=self.TIMEOUT_MS)
+        self._timer.timeout.connect(self._expire)
+        self._timer.start()
+        self.show()
 
-    def _place(self):
-        area = Gdk.Display.get_default().get_monitor(0).get_workarea()
-        w, h = self.get_size()
-        self.move(area.x + area.width - w - 24, area.y + area.height - h - 24)
-        return False
+    def enterEvent(self, _ev):
+        self._timer.stop()
 
-    def _set_hover(self, value):
-        self._hover = value
-        return False
+    def leaveEvent(self, _ev):
+        self._timer.start(3000)
 
     def _expire(self):
-        if self._hover:
-            return True
-        self._timer = 0
-        self.destroy()
-        return False
+        if not self.underMouse():
+            self.close()
 
     def _copy(self):
         ui.copy_capture(self.app.library, self.capture_id)
-        self.destroy()
+        self.close()
 
     def _edit(self):
-        self.destroy()
+        self.close()
         self.app.open_editor(self.capture_id)
 
     def _pin(self):
-        self.app.pin_surface(render.render_capture(self.app.library, self.capture_id))
-        self.destroy()
+        self.app.pin_image(render.render_capture(self.app.library, self.capture_id))
+        self.close()
 
     def _library(self):
-        self.destroy()
+        self.close()
         self.app.show_library(self.capture_id)
 
-    def _discard(self):
+    def _delete(self):
         self.app.library.delete_permanently([self.capture_id])
-        self.destroy()
+        self.close()
 
 
-class Countdown(Gtk.Window):
-    """Visible delay countdown (OPT-01)."""
+class Countdown(QWidget):
+    """Visible delay countdown (OPT-01), drawn as a bracketed number."""
 
     def __init__(self, seconds: int, on_done, on_cancel=None):
-        super().__init__(type=Gtk.WindowType.TOPLEVEL if is_wayland() else Gtk.WindowType.POPUP)
+        super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+                         | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.remaining = seconds
-        self.on_done = on_done
-        self.on_cancel = on_cancel
-        self.set_decorated(False)
-        self.set_keep_above(True)
-        self.set_app_paintable(True)
-        visual = self.get_screen().get_rgba_visual()
-        if visual is not None:
-            self.set_visual(visual)
-        self.connect("draw", lambda _w, cr: (cr.set_source_rgba(0, 0, 0, 0), cr.set_operator(cairo.OPERATOR_SOURCE),
-                                              cr.paint(), False)[-1])
-        self.label = Gtk.Label()
-        self.label.get_style_context().add_class("catcap-countdown")
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        box.add(self.label)
-        self.add(box)
-        self.connect("key-press-event", self._key)
-        self._update()
-        self.show_all()
-        area = Gdk.Display.get_default().get_monitor(0).get_geometry()
-        w, _h = self.get_size()
-        self.move(area.x + (area.width - w) // 2, area.y + 60)
-        GLib.timeout_add_seconds(1, self._tick)
+        self.on_done, self.on_cancel = on_done, on_cancel
+        self.resize(150, 150)
+        area = QGuiApplication.primaryScreen().geometry()
+        self.move(area.center() - QPoint(75, 75))
+        self._timer = QTimer(self, interval=1000)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+        self.show()
+        self.activateWindow()
 
-    def _update(self):
-        self.label.set_text(str(self.remaining))
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(10, 10, 130, 130)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(30, 33, 37, 225))
+        p.drawRoundedRect(r, 28, 28)
+        draw_brackets(p, r.adjusted(14, 14, -14, -14), QColor(ACCENT), 20, 5)
+        font = QFont()
+        font.setPixelSize(58)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QColor("white"))
+        p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), str(self.remaining))
 
     def _tick(self):
         self.remaining -= 1
         if self.remaining <= 0:
-            self.destroy()
-            GLib.timeout_add(250, lambda: (self.on_done(), False)[1])
-            return False
-        self._update()
-        return True
+            self._timer.stop()
+            self.close()
+            QTimer.singleShot(250, self.on_done)
+        else:
+            self.update()
 
-    def _key(self, _w, ev):
-        if ev.keyval == Gdk.KEY_Escape:
-            self.destroy()
+    def keyPressEvent(self, ev):
+        if ev.key() == Qt.Key.Key_Escape:
+            self._timer.stop()
+            self.close()
             if self.on_cancel:
                 self.on_cancel()
-        return True
 
 
 SHORTCUTS = [
     ("Capture overlay", [
-        ("Drag", "Select a region"), ("Click", "Capture the window under the cursor"),
-        ("Arrow keys", "Move pointer or selection by 1 px (Shift: 10 px)"),
-        ("Ctrl+Arrow keys", "Resize the selection"), ("Enter / double-click", "Capture"),
-        ("F or Ctrl+A", "Select the whole screen"), ("C", "Copy colour under cursor"),
-        ("M", "Toggle magnifier"), ("Esc / right-click", "Cancel")]),
+        ("Drag", "Select a region"), ("Click", "Capture the window under the pointer"),
+        ("Arrow keys", "Move the pointer or selection by 1 px (Shift: 10 px)"),
+        ("Ctrl + arrows", "Resize the selection"), ("Enter, double-click", "Capture"),
+        ("F, Ctrl+A", "Select the whole screen"), ("C", "Copy the colour under the pointer"),
+        ("M", "Show or hide the magnifier"), ("Esc, right-click", "Cancel")]),
     ("Editor", [
-        ("V A L R E T O H P S B X G C", "Tools: select, arrow, line, rect, ellipse, text, callout, "
-                                        "highlighter, pen, step, blur, pixelate, spotlight, crop"),
-        ("Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"), ("Delete", "Delete selected annotation"),
-        ("Ctrl+D", "Duplicate"), ("Ctrl+] / Ctrl+[", "Bring to front / send to back"),
-        ("Shift while drawing", "Straight 45° lines, squares, circles"),
-        ("Ctrl+C", "Copy image"), ("Ctrl+S", "Export"), ("Ctrl+scroll, Ctrl+0, Ctrl+1", "Zoom, fit, 100%"),
-        ("Middle-drag / Alt+drag", "Pan"), ("Enter / Esc (crop)", "Apply / cancel crop")]),
+        ("V A L R E T O H P S B X G C", "Select, arrow, line, rectangle, ellipse, text, callout, highlighter, "
+                                        "pen, step, blur, pixelate, spotlight, crop"),
+        ("Ctrl+Z, Ctrl+Shift+Z", "Undo, redo"), ("Delete", "Delete the selected annotation"),
+        ("Ctrl+D", "Duplicate"), ("Ctrl+], Ctrl+[", "Bring to front, send to back"),
+        ("Shift while drawing", "45° lines, squares, circles"), ("Ctrl+C", "Copy the image"),
+        ("Ctrl+S", "Export"), ("Ctrl+scroll, Ctrl+0, Ctrl+1", "Zoom, fit, actual size"),
+        ("Middle-drag, Alt+drag", "Pan"), ("Enter, Esc (crop)", "Apply or cancel the crop")]),
     ("Library", [
-        ("Ctrl+F", "Search"), ("Ctrl+N", "New region capture"), ("Enter / double-click", "Edit"),
-        ("Ctrl+C", "Copy image"), ("Ctrl+V", "New capture from clipboard"), ("Ctrl+E", "Export"),
-        ("Delete / Shift+Delete", "Move to trash / delete permanently"), ("F2", "Rename")]),
+        ("Ctrl+F", "Search"), ("Ctrl+N", "New region capture"), ("Enter, double-click", "Edit"),
+        ("Ctrl+C", "Copy the image"), ("Ctrl+V", "New capture from the clipboard"), ("Ctrl+E", "Export"),
+        ("Delete, Shift+Delete", "Move to trash, delete forever"), ("F2", "Rename")]),
 ]
 
 
-def show_shortcuts(parent):
-    dlg = Gtk.Dialog(title="Keyboard shortcuts", transient_for=parent, modal=False)
-    dlg.add_button("_Close", Gtk.ResponseType.CLOSE)
-    dlg.connect("response", lambda d, _r: d.destroy())
-    sw = Gtk.ScrolledWindow()
-    sw.set_size_request(620, 520)
-    grid = Gtk.Grid(column_spacing=18, row_spacing=6, margin=16)
+def show_shortcuts(parent=None):
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("Keyboard shortcuts")
+    dlg.resize(680, 600)
+    lay = QVBoxLayout(dlg)
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    body = QWidget()
+    grid = QGridLayout(body)
+    grid.setHorizontalSpacing(24)
+    grid.setVerticalSpacing(8)
     row = 0
     for section, items in SHORTCUTS:
-        head = Gtk.Label(xalign=0, margin_top=8 if row else 0)
-        head.set_markup(f"<b>{section}</b>")
-        grid.attach(head, 0, row, 2, 1)
+        head = QLabel(section)
+        head.setObjectName("title")
+        head.setContentsMargins(0, 12 if row else 0, 0, 4)
+        grid.addWidget(head, row, 0, 1, 2)
         row += 1
         for keys, desc in items:
-            k = Gtk.Label(xalign=0)
-            k.set_markup(f"<tt>{GLib.markup_escape_text(keys)}</tt>")
-            grid.attach(k, 0, row, 1, 1)
-            grid.attach(Gtk.Label(label=desc, xalign=0, wrap=True, max_width_chars=50), 1, row, 1, 1)
+            k = QLabel(keys)
+            k.setStyleSheet("font-weight: 600;")
+            d = QLabel(desc)
+            d.setWordWrap(True)
+            grid.addWidget(k, row, 0, Qt.AlignmentFlag.AlignTop)
+            grid.addWidget(d, row, 1)
             row += 1
-    sw.add(grid)
-    dlg.get_content_area().pack_start(sw, True, True, 0)
-    dlg.show_all()
+    grid.setRowStretch(row, 1)
+    scroll.setWidget(body)
+    lay.addWidget(scroll)
+    close = QPushButton("Close")
+    close.clicked.connect(dlg.close)
+    lay.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
+    dlg.show()
     return dlg
+
+
+class WelcomeDialog(QDialog):
+    def __init__(self, app, cinnamon: bool, wayland: bool):
+        super().__init__(None)
+        self.setWindowTitle("Welcome to CatCap")
+        self.setWindowIcon(app.app_icon)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(28, 24, 28, 22)
+        lay.setSpacing(14)
+        head = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(app.app_icon.pixmap(56, 56))
+        head.addWidget(logo)
+        title = QLabel("Welcome to CatCap")
+        title.setObjectName("empty-title")
+        head.addWidget(title)
+        head.addStretch(1)
+        lay.addLayout(head)
+        intro = QLabel("Three quick choices. You can change any of them later in Settings.")
+        intro.setObjectName("muted")
+        lay.addWidget(intro)
+        self.print_check = QCheckBox("Use Print Screen for CatCap (replaces Cinnamon's screenshot keys)"
+                                     if cinnamon else "Turn on global hotkeys")
+        self.print_check.setChecked(True)
+        self.login_check = QCheckBox("Start CatCap when I log in, in the panel tray")
+        self.login_check.setChecked(True)
+        lay.addWidget(self.print_check)
+        lay.addWidget(self.login_check)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("After a capture"))
+        self.after = QComboBox()
+        from .settings_window import AFTER_ACTIONS
+
+        for key, label in AFTER_ACTIONS:
+            self.after.addItem(label, key)
+        self.after.setCurrentIndex(max(0, self.after.findData(app.config.get("capture", "after_action"))))
+        row.addWidget(self.after, 1)
+        lay.addLayout(row)
+        if wayland:
+            note = QLabel("You're in a Wayland session. Screenshots go through the desktop's screenshot portal, "
+                          "which may ask for permission the first time.")
+            note.setObjectName("muted")
+            note.setWordWrap(True)
+            lay.addWidget(note)
+        start = QPushButton("Start using CatCap")
+        start.setProperty("accent", True)
+        start.clicked.connect(self.accept)
+        lay.addWidget(start, 0, Qt.AlignmentFlag.AlignRight)

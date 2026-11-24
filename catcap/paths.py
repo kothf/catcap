@@ -46,13 +46,18 @@ def autostart_dir() -> Path:
 
 
 def pictures_dir() -> Path:
+    """XDG_PICTURES_DIR from ~/.config/user-dirs.dirs (localised on non-English systems)."""
+    env = os.environ.get("XDG_PICTURES_DIR")
+    if env:
+        return Path(env)
     try:
-        from gi.repository import GLib
-
-        pics = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_PICTURES)
-        if pics:
-            return Path(pics)
-    except Exception:  # pragma: no cover - GLib missing only in odd setups
+        text = (_xdg("XDG_CONFIG_HOME", ".config") / "user-dirs.dirs").read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if line.startswith("XDG_PICTURES_DIR="):
+                value = line.split("=", 1)[1].strip().strip('"').replace("$HOME", str(Path.home()))
+                if value:
+                    return Path(value)
+    except OSError:
         pass
     return Path.home() / "Pictures"
 

@@ -16,12 +16,8 @@ sys.path.insert(0, HERE)
 os.environ.setdefault("CATCAP_LAUNCHER", os.path.join(HERE, "run-catcap"))
 
 try:
-    import gi
-
-    gi.require_version("Gtk", "3.0")
-    from gi.repository import Gtk  # noqa: F401
-    import cairo  # noqa: F401
-except (ImportError, ValueError) as exc:
+    from PyQt6 import QtSvg, QtWidgets  # noqa: F401
+except ImportError as exc:
     sys.stderr.write(
         f"CatCap cannot start: {exc}\n"
         "Install the required packages with:\n"

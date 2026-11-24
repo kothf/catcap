@@ -1,4 +1,6 @@
-# Implementation status (v0.1.0)
+# Implementation status (v0.2.0)
+
+v0.2.0 moves the interface from GTK 3 to Qt 6 (PyQt6) with CatCap's own design; features are unchanged.
 
 Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 
@@ -22,8 +24,8 @@ Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 | OPT-01..03 | ✅ | Delay with countdown, cursor (X11), after-capture action |
 | OPT-04 | ✅ | Sound + notification toggles |
 | OPT-05/06 Presets | ⬜ | |
-| TRG-01/02 Hotkeys, Print Screen | ✅ | Cinnamon custom shortcuts (X11 + Wayland), Print takeover with restore, conflict warnings; libkeybinder on other X11 desktops |
-| TRG-03 Tray | ✅ | XApp status icon on Mint, AppIndicator / GtkStatusIcon fallback |
+| TRG-01/02 Hotkeys, Print Screen | ✅ | Cinnamon custom shortcuts (X11 + Wayland), Print takeover with restore (`catcap --release-hotkeys`), conflict warnings. Other desktops: bind the shown commands manually |
+| TRG-03 Tray | ✅ | Qt system tray (StatusNotifierItem / XEmbed) |
 | TRG-04 CLI | ✅ | `catcap --help` |
 | TRG-05 D-Bus API | ⬜ | |
 
@@ -65,7 +67,7 @@ Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 | Item | Status | Notes |
 |---|---|---|
 | SET-01..05, APP-01, APP-02, APP-04 | ✅ | |
-| APP-03 Localisation | ⬜ | Strings are not wrapped for gettext yet |
+| APP-03 Localisation | ⬜ | Strings are not wrapped for translation yet |
 | Wayland (NFR-C2) | ✅ | Portal capture, own overlay on the primary monitor, clear messages; tested against a mock portal, not yet on a real Cinnamon Wayland session |
 | HiDPI / multi-monitor | 🟡 | Scale-aware code, not yet tested on real hardware |
 | NFR-S3 Exclude windows | ⬜ | |
@@ -73,7 +75,6 @@ Mapped against [FRS.md](FRS.md). ✅ done · 🟡 partial · ⬜ not yet.
 | Flatpak (NFR-D2) | ⬜ | |
 
 ## Tested so far
-- Unit tests: config, library, annotations, rendering/export, filename templates, hotkey parsing, and the Wayland portal flow against a mock `xdg-desktop-portal`.
+- Unit tests: config, library, annotations, rendering/export, filename templates, hotkey parsing, Cinnamon hotkey takeover/restore against the real schemas, and the Wayland portal flow against a mock `xdg-desktop-portal`.
 - GUI runs under Xvfb + Openbox: full/active/region capture, overlay, quick toolbar, editor tools, crop, library grid/list/preview, settings.
-- Cinnamon hotkey registration and Print Screen takeover/restore against the real Cinnamon settings schemas.
 - Not yet run on a real Linux Mint desktop. Please report anything odd.

@@ -2,9 +2,9 @@
 # Install the system packages CatCap needs to run from this folder (Linux Mint 21/22, Ubuntu 22.04+).
 set -euo pipefail
 
-required=(python3 python3-gi python3-gi-cairo python3-cairo gir1.2-gtk-3.0 python3-pil gir1.2-wnck-3.0 xdg-utils)
-optional=(gir1.2-xapp-1.0 gir1.2-ayatanaappindicator3-0.1 gir1.2-keybinder-3.0 xdg-desktop-portal
-          xdg-desktop-portal-xapp xdg-desktop-portal-gtk dpkg-dev)
+required=(python3 python3-pyqt6 python3-pyqt6.qtsvg python3-xlib xdg-utils libglib2.0-bin)
+optional=(qt6-image-formats-plugins qt6-wayland xdg-desktop-portal xdg-desktop-portal-xapp
+          xdg-desktop-portal-gtk dpkg-dev)
 
 available=()
 for pkg in "${optional[@]}"; do

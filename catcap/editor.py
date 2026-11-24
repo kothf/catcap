@@ -1,4 +1,4 @@
-"""Editor window (EDT-*, ANN-*, IMG-*)."""
+"""Editor window (EDT-*, ANN-*, IMG-*): graphite canvas, floating tool dock, contextual settings."""
 
 from __future__ import annotations
 
@@ -6,33 +6,35 @@ import copy
 import json
 import math
 
-import cairo
-import gi
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QDrag, QImage, QKeySequence, QPainter, QPainterPath, QPen, QShortcut
+from PyQt6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QDialogButtonBox,
+                             QFontDialog, QFormLayout, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu,
+                             QPushButton, QScrollArea, QSlider, QSpinBox, QToolButton, QVBoxLayout,
+                             QWidget)
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
-
-from . import annotations as ann  # noqa: E402
-from . import icons, render, ui  # noqa: E402
-from .annotations import Document  # noqa: E402
+from . import annotations as ann
+from . import render, ui
+from .annotations import Document
+from .theme import ACCENT, CANVAS, draw_brackets
 
 TOOLS = [
-    ("select", "Select and move (V)", "v"),
-    ("arrow", "Arrow (A)", "a"),
-    ("line", "Line (L)", "l"),
-    ("rect", "Rectangle (R)", "r"),
-    ("ellipse", "Ellipse (E)", "e"),
-    ("text", "Text (T)", "t"),
-    ("callout", "Callout: drag from the point to the bubble (O)", "o"),
-    ("highlighter", "Highlighter (H)", "h"),
-    ("pen", "Pen (P)", "p"),
-    ("step", "Numbered step (S)", "s"),
-    ("blur", "Blur (B)", "b"),
-    ("pixelate", "Pixelate (X)", "x"),
-    ("spotlight", "Spotlight (G)", "g"),
-    ("crop", "Crop (C)", "c"),
+    ("select", "Select and move", "V"),
+    ("arrow", "Arrow", "A"),
+    ("line", "Line", "L"),
+    ("rect", "Rectangle", "R"),
+    ("ellipse", "Ellipse", "E"),
+    ("text", "Text", "T"),
+    ("callout", "Callout", "O"),
+    ("highlighter", "Highlighter", "H"),
+    ("pen", "Pen", "P"),
+    ("step", "Numbered step", "S"),
+    ("blur", "Blur", "B"),
+    ("pixelate", "Pixelate", "X"),
+    ("spotlight", "Spotlight", "G"),
+    ("crop", "Crop", "C"),
 ]
+GROUP_BREAKS = {"select", "callout", "step", "spotlight"}
 
 DEFAULT_STYLES = {
     "arrow": {"color": "#e53935", "width": 5, "shadow": True},
@@ -48,31 +50,231 @@ DEFAULT_STYLES = {
     "pixelate": {"strength": 12},
     "spotlight": {"dim": 0.55},
 }
-
 PROPS_FOR = {
-    "arrow": {"color", "width", "shadow", "opacity"},
-    "line": {"color", "width", "dashed", "shadow", "opacity"},
-    "rect": {"color", "width", "fill", "shadow", "opacity"},
-    "ellipse": {"color", "width", "fill", "shadow", "opacity"},
-    "text": {"color", "font", "bg", "shadow", "opacity"},
-    "callout": {"color", "font", "opacity"},
-    "highlighter": {"color", "width"},
-    "pen": {"color", "width", "shadow", "opacity"},
-    "step": {"color", "size", "style", "opacity"},
-    "blur": {"strength"},
-    "pixelate": {"strength"},
-    "spotlight": set(),
-    "select": set(),
-    "crop": {"aspect"},
+    "arrow": ["color", "width", "shadow", "opacity"],
+    "line": ["color", "width", "dashed", "shadow", "opacity"],
+    "rect": ["color", "width", "fill", "shadow", "opacity"],
+    "ellipse": ["color", "width", "fill", "shadow", "opacity"],
+    "text": ["color", "font", "bg", "shadow", "opacity"],
+    "callout": ["color", "font", "opacity"],
+    "highlighter": ["color", "width"],
+    "pen": ["color", "width", "shadow", "opacity"],
+    "step": ["color", "size", "style", "opacity"],
+    "blur": ["strength"],
+    "pixelate": ["strength"],
+    "spotlight": [],
+    "select": [],
+    "crop": ["aspect"],
 }
-
+HINTS = {
+    "select": "Click an annotation to select it. Drag to move, Delete removes it, double-click edits text.",
+    "arrow": "Drag to draw. Hold Shift for 45° steps.",
+    "line": "Drag to draw. Hold Shift for 45° steps.",
+    "rect": "Drag to draw. Hold Shift for a square.",
+    "ellipse": "Drag to draw. Hold Shift for a circle.",
+    "text": "Click where the text should start.",
+    "callout": "Drag from the point of interest to where the bubble goes.",
+    "highlighter": "Drag across what you want to highlight.",
+    "pen": "Drag to draw freehand.",
+    "step": "Click to place the next number.",
+    "blur": "Drag over anything private.",
+    "pixelate": "Drag over anything private.",
+    "spotlight": "Drag the areas to keep bright; the rest is dimmed.",
+    "crop": "Drag to choose the area. Enter applies, Esc cancels.",
+}
+SWATCHES = ["#e53935", "#fb8c00", "#fdd835", "#43a047", "#1e88e5", "#8e24aa", "#212121", "#ffffff"]
 ASPECTS = [("Free", None), ("1:1", 1.0), ("4:3", 4 / 3), ("3:2", 3 / 2), ("16:9", 16 / 9), ("9:16", 9 / 16)]
+BAR_ICON = "#E9ECEA"
 
 
-class Editor(Gtk.ApplicationWindow):
+# ====================================================================== canvas
+class Canvas(QWidget):
+    cursorMoved = pyqtSignal(float, float)
+
+    def __init__(self, editor: "Editor"):
+        super().__init__()
+        self.ed = editor
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAutoFillBackground(False)
+
+    # coordinate mapping ----------------------------------------------
+    def origin(self) -> QPointF:
+        _cx, _cy, w, h = self.ed.view_rect()
+        z = self.ed.zoom
+        return QPointF(max(24.0, (self.width() - w * z) / 2), max(24.0, (self.height() - h * z) / 2))
+
+    def to_doc(self, pos) -> tuple[float, float]:
+        cx, cy, _w, _h = self.ed.view_rect()
+        o = self.origin()
+        return (pos.x() - o.x()) / self.ed.zoom + cx, (pos.y() - o.y()) / self.ed.zoom + cy
+
+    def sizeHint(self):
+        if self.ed.base is None:
+            return QSize(200, 200)
+        _cx, _cy, w, h = self.ed.view_rect()
+        return QSize(int(w * self.ed.zoom) + 48, int(h * self.ed.zoom) + 48)
+
+    # painting ----------------------------------------------------------
+    def paintEvent(self, _ev):
+        ed = self.ed
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(CANVAS))
+        if ed.rendered is None:
+            return
+        cx, cy, w, h = ed.view_rect()
+        o = self.origin()
+        z = ed.zoom
+        frame = QRectF(o.x(), o.y(), w * z, h * z)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        for i, alpha in enumerate((40, 26, 14)):      # soft drop shadow under the image
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, alpha))
+            p.drawRoundedRect(frame.adjusted(-2 - i * 2, 0 - i, 2 + i * 2, 6 + i * 3), 4 + i, 4 + i)
+        p.save()
+        p.translate(o)
+        p.scale(z, z)
+        p.translate(-cx, -cy)
+        p.setClipRect(QRectF(cx, cy, w, h))
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, z < 2)
+        p.drawImage(0, 0, ed.rendered)
+        if ed.active is not None:
+            kind = ed.active["type"]
+            if kind in ann.EFFECT_KINDS or kind == "spotlight":
+                self._dashed(p, QRectF(*ann.bbox(ed.active)))
+            else:
+                render.draw_item(p, ed.active)
+        p.setClipping(False)
+        if ed.selected is not None and ed.tool == "select":
+            x, y, bw, bh = ann.bbox(ed.selected)
+            pad = 6 / z
+            draw_brackets(p, QRectF(x - pad, y - pad, bw + 2 * pad, bh + 2 * pad), QColor(ACCENT), 12 / z, 3 / z)
+            for _n, hx, hy in ann.handles(ed.selected):
+                self._knob(p, hx, hy)
+        if ed.tool == "crop" and ed.crop_draft:
+            r = QRectF(*ed.crop_draft)
+            dim = QPainterPath()
+            dim.setFillRule(Qt.FillRule.OddEvenFill)
+            dim.addRect(QRectF(cx, cy, w, h))
+            dim.addRect(r)
+            p.fillPath(dim, QColor(0, 0, 0, 140))
+            p.setPen(QPen(QColor(255, 255, 255, 90), 1 / z))
+            for i in (1, 2):
+                p.drawLine(QPointF(r.left() + r.width() * i / 3, r.top()), QPointF(r.left() + r.width() * i / 3, r.bottom()))
+                p.drawLine(QPointF(r.left(), r.top() + r.height() * i / 3), QPointF(r.right(), r.top() + r.height() * i / 3))
+            draw_brackets(p, r, QColor("white"), 20 / z, 4 / z)
+        p.restore()
+        p.end()
+
+    def _dashed(self, p, rect: QRectF):
+        z = self.ed.zoom
+        pen = QPen(QColor("white"), 1.5 / z, Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.setBrush(QColor(255, 255, 255, 25))
+        p.drawRect(rect)
+
+    def _knob(self, p, x, y):
+        z = self.ed.zoom
+        p.setPen(QPen(QColor(ACCENT), 2 / z))
+        p.setBrush(QColor("white"))
+        p.drawEllipse(QPointF(x, y), 5 / z, 5 / z)
+
+    # events ------------------------------------------------------------
+    def mousePressEvent(self, ev):
+        self.setFocus()
+        self.ed.on_press(ev)
+
+    def mouseMoveEvent(self, ev):
+        x, y = self.to_doc(ev.position())
+        self.cursorMoved.emit(x, y)
+        self.ed.on_motion(ev)
+
+    def mouseReleaseEvent(self, ev):
+        self.ed.on_release(ev)
+
+    def mouseDoubleClickEvent(self, ev):
+        self.ed.on_double_click(ev)
+
+    def wheelEvent(self, ev):
+        if ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.ed.set_zoom(self.ed.zoom * (1.15 if ev.angleDelta().y() > 0 else 1 / 1.15))
+            ev.accept()
+        else:
+            ev.ignore()
+
+    def contextMenuEvent(self, ev):
+        self.ed.context_menu(ev)
+
+
+# ====================================================================== floating panels
+class ColorButton(QToolButton):
+    colorChanged = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.color = "#e53935"
+        self.setToolTip("Colour")
+        self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        menu = QMenu(self)
+        grid = QWidget()
+        lay = QHBoxLayout(grid)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(6)
+        for c in SWATCHES:
+            b = QToolButton()
+            b.setFixedSize(26, 26)
+            b.setStyleSheet(f"QToolButton {{ background: {c}; border-radius: 13px; border: 2px solid rgba(255,255,255,0.25); }}"
+                            f"QToolButton:hover {{ border-color: white; }}")
+            b.clicked.connect(lambda _c=False, col=c: (self.set_color(col, emit=True), menu.close()))
+            lay.addWidget(b)
+        more = QToolButton()
+        more.setText("…")
+        more.setToolTip("Other colour")
+        more.clicked.connect(lambda: (menu.close(), self._pick()))
+        lay.addWidget(more)
+        from PyQt6.QtWidgets import QWidgetAction
+
+        act = QWidgetAction(menu)
+        act.setDefaultWidget(grid)
+        menu.addAction(act)
+        self.setMenu(menu)
+        self._paint()
+
+    def _pick(self):
+        c = QColorDialog.getColor(QColor(self.color), self, "Colour")
+        if c.isValid():
+            self.set_color(c.name(), emit=True)
+
+    def set_color(self, color: str, emit=False):
+        self.color = color
+        self._paint()
+        if emit:
+            self.colorChanged.emit(color)
+
+    def _paint(self):
+        self.setStyleSheet("QToolButton { background: transparent; border-radius: 8px; padding: 4px; }"
+                           "QToolButton:hover { background: #383D43; }")
+        from PyQt6.QtGui import QIcon, QPixmap
+
+        pm = QPixmap(40, 40)
+        pm.fill(Qt.GlobalColor.transparent)
+        q = QPainter(pm)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        q.setPen(QPen(QColor(255, 255, 255, 120), 3))
+        q.setBrush(QColor(self.color))
+        q.drawEllipse(QRectF(4, 4, 32, 32))
+        q.end()
+        pm.setDevicePixelRatio(2)
+        self.setIcon(QIcon(pm))
+        self.setIconSize(QSize(20, 20))
+
+
+# ====================================================================== window
+class Editor(QMainWindow):
     def __init__(self, app, capture_id: str):
-        super().__init__(application=app)
+        super().__init__()
         self.app = app
+        self.theme = app.theme
         self.library = app.library
         self.config = app.config
         self.capture_id = capture_id
@@ -82,363 +284,381 @@ class Editor(Gtk.ApplicationWindow):
         self.undo_stack: list[str] = []
         self.redo_stack: list[str] = []
         self.tool = "select"
-        self.selected: dict | None = None
-        self.active: dict | None = None   # item being created or dragged
-        self.drag = None                   # dict describing the current drag
-        self.crop_draft: list | None = None
+        self.selected = None
+        self.active = None
+        self.drag = None
+        self.crop_draft = None
         self.aspect = None
         self.zoom = 1.0
         self.fit_mode = True
         self.base = None
         self.rendered = None
-        self._save_source = 0
-        self._updating_props = False
+        self._loading_props = False
         self._pan = None
+        self._save_timer = QTimer(self, singleShot=True, interval=500)
+        self._save_timer.timeout.connect(self._save_now)
         self.styles = copy.deepcopy(DEFAULT_STYLES)
         try:
-            saved = json.loads(self.config.get("editor", "styles") or "{}")
-            for k, v in saved.items():
+            for k, v in json.loads(self.config.get("editor", "styles") or "{}").items():
                 if k in self.styles and isinstance(v, dict):
                     self.styles[k].update(v)
         except (ValueError, TypeError):
             pass
-
+        self.setWindowIcon(app.app_icon)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        screen = self.screen().availableGeometry()
+        self.resize(min(1320, int(screen.width() * 0.85)), min(880, int(screen.height() * 0.85)))
         self._build()
         self._rebuild_base()
-        self._set_tool("select")
+        self.set_tool("select")
         self._update_title()
-        self.connect("key-press-event", self._on_key)
-        self.connect("delete-event", self._on_delete)
         self.library.connect(self._on_library_event)
-        self.connect("destroy", lambda *_: self.library.disconnect(self._on_library_event))
+        self.destroyed.connect(lambda *_: self.library.disconnect(self._on_library_event))
 
-    # ================================================================ build UI
+    # ------------------------------------------------------------ layout
+    def _icon_btn(self, icon, tip, cb, color=BAR_ICON, checkable=False):
+        b = QToolButton()
+        b.setIcon(self.theme.icon(icon, color, 20))
+        b.setIconSize(QSize(20, 20))
+        b.setToolTip(tip)
+        b.setCheckable(checkable)
+        b.setAutoRaise(True)
+        if cb:
+            b.clicked.connect(lambda _c=False: cb())
+        return b
+
     def _build(self):
-        geom = Gdk.Display.get_default().get_monitor(0).get_workarea()
-        self.set_default_size(min(1280, int(geom.width * 0.85)), min(860, int(geom.height * 0.85)))
-        self.set_icon_name("io.github.kothf.CatCap")
+        root = QWidget()
+        root.setObjectName("editor-root")
+        self.setCentralWidget(root)
+        col = QVBoxLayout(root)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
 
-        header = Gtk.HeaderBar(show_close_button=True)
-        self.set_titlebar(header)
-        self.undo_btn = self._icon_button("edit-undo-symbolic", "Undo (Ctrl+Z)", self.undo)
-        self.redo_btn = self._icon_button("edit-redo-symbolic", "Redo (Ctrl+Shift+Z)", self.redo)
-        header.pack_start(self.undo_btn)
-        header.pack_start(self.redo_btn)
+        bar = QFrame()
+        bar.setObjectName("editor-bar")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(10, 8, 10, 8)
+        row.setSpacing(4)
+        self.undo_btn = self._icon_btn("undo", "Undo (Ctrl+Z)", self.undo)
+        self.redo_btn = self._icon_btn("redo", "Redo (Ctrl+Shift+Z)", self.redo)
+        row.addWidget(self.undo_btn)
+        row.addWidget(self.redo_btn)
+        row.addSpacing(10)
+        self.title = QLabel()
+        self.title.setObjectName("title")
+        row.addWidget(self.title)
+        row.addStretch(1)
+        drag = DragHandle(self)
+        row.addWidget(drag)
+        for icon, tip, cb in (("pin", "Pin to screen", lambda: self.app.pin_image(self.render_output())),
+                              ("export", "Export… (Ctrl+S)", self.export)):
+            row.addWidget(self._icon_btn(icon, tip, cb))
+        more = self._icon_btn("more", "More", None)
+        more.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        more.setMenu(self._build_menu())
+        row.addWidget(more)
+        row.addWidget(self._icon_btn("grid", "Library", lambda: self.app.show_library(self.capture_id)))
+        row.addSpacing(6)
+        copy_btn = QPushButton(" Copy")
+        copy_btn.setProperty("accent", True)
+        copy_btn.setIcon(self.theme.icon("copy", "#FFFFFF", 18))
+        copy_btn.setToolTip("Copy image (Ctrl+C)")
+        copy_btn.clicked.connect(self.copy)
+        row.addWidget(copy_btn)
+        col.addWidget(bar)
 
-        library_btn = self._icon_button("view-grid-symbolic", "Open library", lambda *_: self.app.show_library(self.capture_id))
-        header.pack_end(library_btn)
-        menu_btn = Gtk.MenuButton(image=Gtk.Image.new_from_icon_name("open-menu-symbolic", Gtk.IconSize.BUTTON),
-                                  tooltip_text="More")
-        menu_btn.set_popup(self._build_menu())
-        header.pack_end(menu_btn)
-        pin = self._icon_button("view-pin-symbolic", "Pin to screen", lambda *_: self.app.pin_surface(self.render_output()))
-        header.pack_end(pin)
-        export = Gtk.Button(label="Export…", tooltip_text="Save as PNG, JPG, WebP, BMP or PDF (Ctrl+Shift+S)")
-        export.connect("clicked", lambda *_: self.export())
-        header.pack_end(export)
-        copy_btn = Gtk.Button(label="Copy", tooltip_text="Copy image to clipboard (Ctrl+C)")
-        copy_btn.get_style_context().add_class("suggested-action")
-        copy_btn.connect("clicked", lambda *_: self.copy())
-        header.pack_end(copy_btn)
+        stage = QWidget()
+        stage_lay = QVBoxLayout(stage)
+        stage_lay.setContentsMargins(0, 0, 0, 0)
+        self.canvas = Canvas(self)
+        self.canvas.cursorMoved.connect(lambda x, y: self._update_status((x, y)))
+        self.scroll = QScrollArea()
+        self.scroll.setWidget(self.canvas)
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setStyleSheet(f"QScrollArea {{ background: {CANVAS}; }}")
+        stage_lay.addWidget(self.scroll)
+        col.addWidget(stage, 1)
 
-        drag = Gtk.EventBox(tooltip_text="Drag this into another app (file manager, browser, chat)")
-        drag_box = Gtk.Box(spacing=4)
-        drag_box.add(icons.tool_image("drag", header))
-        drag_box.add(Gtk.Label(label="Drag"))
-        drag.add(drag_box)
-        drag.get_style_context().add_class("catcap-drag")
-        drag.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [ui.URI_TARGET], Gdk.DragAction.COPY)
-        drag.connect("drag-data-get", self._on_drag_data_get)
-        drag.connect("drag-begin", lambda w, ctx: Gtk.drag_set_icon_name(ctx, "image-x-generic", 0, 0))
-        header.pack_end(drag)
+        self.dock = self._build_dock(stage)
+        self.props = self._build_props(stage)
+        stage.installEventFilter(self)
+        self._stage = stage
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.add(root)
-        root.add(self._build_props())
-        root.add(Gtk.Separator())
+        status = QFrame()
+        status.setObjectName("statusline")
+        srow = QHBoxLayout(status)
+        srow.setContentsMargins(14, 4, 10, 6)
+        self.status = QLabel()
+        srow.addWidget(self.status, 1)
+        for icon, tip, cb in (("zoom-out", "Zoom out (Ctrl+-)", lambda: self.set_zoom(self.zoom / 1.25)),):
+            srow.addWidget(self._icon_btn(icon, tip, cb, "#C9CDD0"))
+        self.zoom_btn = QToolButton()
+        self.zoom_btn.setToolTip("Actual size (Ctrl+1)")
+        self.zoom_btn.clicked.connect(lambda: self.set_zoom(1.0))
+        srow.addWidget(self.zoom_btn)
+        srow.addWidget(self._icon_btn("zoom-in", "Zoom in (Ctrl++)", lambda: self.set_zoom(self.zoom * 1.25), "#C9CDD0"))
+        srow.addWidget(self._icon_btn("fit", "Fit to window (Ctrl+0)", self.zoom_fit, "#C9CDD0"))
+        status.setStyleSheet(f"QFrame#statusline {{ background: {CANVAS}; }}")
+        col.addWidget(status)
+        self._shortcuts()
 
-        body = Gtk.Box()
-        root.pack_start(body, True, True, 0)
-        body.add(self._build_tools())
-        body.add(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
-
-        self.canvas = Gtk.DrawingArea(can_focus=True)
-        self.canvas.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK
-                               | Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.SCROLL_MASK
-                               | Gdk.EventMask.SMOOTH_SCROLL_MASK)
-        self.canvas.connect("draw", self._on_draw)
-        self.canvas.connect("button-press-event", self._on_press)
-        self.canvas.connect("button-release-event", self._on_release)
-        self.canvas.connect("motion-notify-event", self._on_motion)
-        self.canvas.connect("scroll-event", self._on_scroll)
-        self.canvas.connect("size-allocate", self._on_canvas_allocate)
-        self.canvas.get_style_context().add_class("catcap-canvas")
-        self.scroller = Gtk.ScrolledWindow()
-        self.scroller.add(self.canvas)
-        body.pack_start(self.scroller, True, True, 0)
-
-        status = Gtk.Box(spacing=12, margin=4, margin_start=10, margin_end=10)
-        self.status = Gtk.Label(xalign=0)
-        self.status.get_style_context().add_class("catcap-dim")
-        status.pack_start(self.status, True, True, 0)
-        zoom_out = self._icon_button("zoom-out-symbolic", "Zoom out (Ctrl+-)", lambda *_: self.set_zoom(self.zoom / 1.25))
-        zoom_in = self._icon_button("zoom-in-symbolic", "Zoom in (Ctrl++)", lambda *_: self.set_zoom(self.zoom * 1.25))
-        self.zoom_label = Gtk.Button(label="100%", tooltip_text="Actual size (Ctrl+1)", relief=Gtk.ReliefStyle.NONE)
-        self.zoom_label.connect("clicked", lambda *_: self.set_zoom(1.0))
-        fit = self._icon_button("zoom-fit-best-symbolic", "Fit to window (Ctrl+0)", lambda *_: self.zoom_fit())
-        for w in (fit, zoom_in, self.zoom_label, zoom_out):
-            w.set_relief(Gtk.ReliefStyle.NONE)
-            status.pack_end(w, False, False, 0)
-        root.add(Gtk.Separator())
-        root.add(status)
-        root.show_all()
-        header.show_all()
-        self._sync_props_visibility()
-
-    def _icon_button(self, icon, tip, cb):
-        btn = Gtk.Button(image=Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON), tooltip_text=tip)
-        btn.connect("clicked", cb)
-        return btn
-
-    def _build_menu(self):
-        menu = Gtk.Menu()
-        entries = [
-            ("Rotate left", lambda: self.image_op("rotate_ccw")),
-            ("Rotate right", lambda: self.image_op("rotate_cw")),
-            ("Flip horizontally", lambda: self.image_op("flip_h")),
-            ("Flip vertically", lambda: self.image_op("flip_v")),
-            ("Resize image…", self.resize_dialog),
-            (None, None),
-            ("Export as PDF…", lambda: ui.export_pdf_dialog(self, self.library, self.config, [self.capture_id])),
-            ("Open with…", lambda: ui.open_with(self, ui.temp_render(self.library, self.capture_id, self.config))),
-            ("Send by email…", lambda: ui.send_email(ui.temp_render(self.library, self.capture_id, self.config))),
-            ("Show original in file manager", lambda: ui.show_in_folder(self.library.original_path(self.capture_id))),
-            (None, None),
-            ("Revert to original", self.revert),
-            ("Keyboard shortcuts", lambda: self.app.show_shortcuts(self)),
-        ]
-        for label, cb in entries:
-            if label is None:
-                menu.append(Gtk.SeparatorMenuItem())
-                continue
-            item = Gtk.MenuItem(label=label)
-            item.connect("activate", lambda _w, c=cb: c())
-            menu.append(item)
-        menu.show_all()
-        return menu
-
-    def _build_tools(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin=4)
-        box.get_style_context().add_class("catcap-toolbar")
+    def _build_dock(self, parent):
+        dock = QFrame(parent)
+        dock.setObjectName("dock")
+        row = QHBoxLayout(dock)
+        row.setContentsMargins(8, 6, 8, 6)
+        row.setSpacing(2)
+        self.tool_group = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
         self.tool_buttons = {}
-        group = None
-        for name, tip, _key in TOOLS:
-            btn = Gtk.RadioButton.new_from_widget(group)
-            group = group or btn
-            btn.set_mode(False)
-            btn.set_relief(Gtk.ReliefStyle.NONE)
-            btn.set_tooltip_text(tip)
-            btn.set_image(icons.tool_image(name, None))
-            btn.connect("style-updated", lambda b, n=name: b.set_image(icons.tool_image(n, b)))
-            btn.connect("toggled", self._on_tool_toggled, name)
-            box.add(btn)
-            self.tool_buttons[name] = btn
-            if name in ("select", "callout", "step", "spotlight"):
-                box.add(Gtk.Separator(margin_top=3, margin_bottom=3))
-        return box
+        for name, label, key in TOOLS:
+            b = QToolButton()
+            b.setCheckable(True)
+            b.setIcon(self.theme.icon(name, BAR_ICON, 22))
+            b.setIconSize(QSize(22, 22))
+            b.setToolTip(f"{label}  ({key})")
+            b.clicked.connect(lambda _c=False, n=name: self.set_tool(n))
+            self.tool_group.addButton(b)
+            self.tool_buttons[name] = b
+            row.addWidget(b)
+            if name in GROUP_BREAKS:
+                sep = QFrame()
+                sep.setFixedSize(1, 22)
+                sep.setStyleSheet("background: #41464C;")
+                row.addSpacing(4)
+                row.addWidget(sep)
+                row.addSpacing(4)
+        dock.adjustSize()
+        return dock
 
-    def _build_props(self):
-        bar = Gtk.Box(spacing=8, margin=6, margin_start=10)
+    def _build_props(self, parent):
+        props = QFrame(parent)
+        props.setObjectName("props")
+        row = QHBoxLayout(props)
+        row.setContentsMargins(10, 6, 10, 6)
+        row.setSpacing(10)
         self.prop_widgets = {}
 
-        def add(key, label, widget):
-            wrap = Gtk.Box(spacing=4)
+        def add(key, widget, label=None):
+            box = QWidget()
+            lay = QHBoxLayout(box)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(6)
             if label:
-                wrap.add(Gtk.Label(label=label))
-            wrap.add(widget)
-            bar.add(wrap)
-            self.prop_widgets[key] = wrap
+                lay.addWidget(QLabel(label))
+            lay.addWidget(widget)
+            row.addWidget(box)
+            self.prop_widgets[key] = box
             return widget
 
-        self.tool_label = Gtk.Label(xalign=0, width_chars=10)
-        self.tool_label.get_style_context().add_class("catcap-preview-title")
-        bar.add(self.tool_label)
-        self.color_btn = add("color", "", Gtk.ColorButton(tooltip_text="Colour"))
-        self.color_btn.connect("color-set", lambda *_: self._prop_changed("color"))
-        self.width_spin = add("width", "Width", Gtk.SpinButton.new_with_range(1, 60, 1))
-        self.width_spin.connect("value-changed", lambda *_: self._prop_changed("width"))
-        self.size_spin = add("size", "Size", Gtk.SpinButton.new_with_range(12, 160, 2))
-        self.size_spin.connect("value-changed", lambda *_: self._prop_changed("size"))
-        self.style_combo = add("style", "", Gtk.ComboBoxText())
-        self.style_combo.append("number", "1, 2, 3")
-        self.style_combo.append("letter", "A, B, C")
-        self.style_combo.connect("changed", lambda *_: self._prop_changed("style"))
-        self.font_btn = add("font", "", Gtk.FontButton(tooltip_text="Font"))
-        self.font_btn.set_use_size(False)
-        self.font_btn.connect("font-set", lambda *_: self._prop_changed("font"))
-        self.strength_spin = add("strength", "Strength", Gtk.SpinButton.new_with_range(2, 60, 1))
-        self.strength_spin.connect("value-changed", lambda *_: self._prop_changed("strength"))
-        self.fill_check = add("fill", "", Gtk.CheckButton(label="Fill"))
-        self.fill_check.connect("toggled", lambda *_: self._prop_changed("fill"))
-        self.bg_check = add("bg", "", Gtk.CheckButton(label="Background"))
-        self.bg_check.connect("toggled", lambda *_: self._prop_changed("bg"))
-        self.dashed_check = add("dashed", "", Gtk.CheckButton(label="Dashed"))
-        self.dashed_check.connect("toggled", lambda *_: self._prop_changed("dashed"))
-        self.shadow_check = add("shadow", "", Gtk.CheckButton(label="Shadow"))
-        self.shadow_check.connect("toggled", lambda *_: self._prop_changed("shadow"))
-        self.opacity_scale = add("opacity", "Opacity", Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10, 100, 5))
-        self.opacity_scale.set_size_request(90, -1)
-        self.opacity_scale.set_draw_value(False)
-        self.opacity_scale.set_value(100)
-        self.opacity_scale.connect("value-changed", lambda *_: self._prop_changed("opacity"))
+        self.tool_label = QLabel()
+        self.tool_label.setStyleSheet("font-weight: 600;")
+        row.addWidget(self.tool_label)
+        self.color_btn = add("color", ColorButton())
+        self.color_btn.colorChanged.connect(lambda c: self._prop_changed({"color": c}))
+        self.width_spin = add("width", QSpinBox(), "Width")
+        self.width_spin.setRange(1, 60)
+        self.width_spin.valueChanged.connect(lambda v: self._prop_changed({"width": v}))
+        self.size_spin = add("size", QSpinBox(), "Size")
+        self.size_spin.setRange(12, 160)
+        self.size_spin.setSingleStep(2)
+        self.size_spin.valueChanged.connect(lambda v: self._prop_changed({"size": v}))
+        self.style_combo = add("style", QComboBox())
+        self.style_combo.addItem("1, 2, 3", "number")
+        self.style_combo.addItem("A, B, C", "letter")
+        self.style_combo.currentIndexChanged.connect(lambda _i: self._prop_changed({"style": self.style_combo.currentData()}))
+        self.font_btn = add("font", QToolButton())
+        self.font_btn.clicked.connect(self._pick_font)
+        self.strength_spin = add("strength", QSpinBox(), "Strength")
+        self.strength_spin.setRange(2, 60)
+        self.strength_spin.valueChanged.connect(lambda v: self._prop_changed({"strength": v}))
+        self.fill_check = add("fill", QCheckBox("Fill"))
+        self.fill_check.toggled.connect(lambda v: self._prop_changed({"fill": v}))
+        self.bg_check = add("bg", QCheckBox("Background"))
+        self.bg_check.toggled.connect(lambda v: self._prop_changed({"bg": v}))
+        self.dashed_check = add("dashed", QCheckBox("Dashed"))
+        self.dashed_check.toggled.connect(lambda v: self._prop_changed({"dashed": v}))
+        self.shadow_check = add("shadow", QCheckBox("Shadow"))
+        self.shadow_check.toggled.connect(lambda v: self._prop_changed({"shadow": v}))
+        self.opacity = add("opacity", QSlider(Qt.Orientation.Horizontal), "Opacity")
+        self.opacity.setRange(10, 100)
+        self.opacity.setFixedWidth(90)
+        self.opacity.valueChanged.connect(lambda v: self._prop_changed({"opacity": v / 100}))
 
-        crop_box = Gtk.Box(spacing=6)
-        self.aspect_combo = Gtk.ComboBoxText(tooltip_text="Aspect ratio")
+        crop = QWidget()
+        cl = QHBoxLayout(crop)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(6)
+        self.aspect_combo = QComboBox()
         for label, _v in ASPECTS:
-            self.aspect_combo.append_text(label)
-        self.aspect_combo.set_active(0)
-        self.aspect_combo.connect("changed", self._on_aspect)
-        apply_btn = Gtk.Button(label="Apply crop")
-        apply_btn.get_style_context().add_class("suggested-action")
-        apply_btn.connect("clicked", lambda *_: self.apply_crop())
-        reset_btn = Gtk.Button(label="Remove crop")
-        reset_btn.connect("clicked", lambda *_: self.reset_crop())
-        crop_box.add(self.aspect_combo)
-        crop_box.add(apply_btn)
-        crop_box.add(reset_btn)
-        bar.add(crop_box)
-        self.prop_widgets["aspect"] = crop_box
+            self.aspect_combo.addItem(label)
+        self.aspect_combo.currentIndexChanged.connect(self._on_aspect)
+        apply_btn = QPushButton("Apply crop")
+        apply_btn.setProperty("accent", True)
+        apply_btn.clicked.connect(self.apply_crop)
+        reset_btn = QToolButton()
+        reset_btn.setText("Remove crop")
+        reset_btn.clicked.connect(self.reset_crop)
+        cl.addWidget(QLabel("Aspect"))
+        cl.addWidget(self.aspect_combo)
+        cl.addWidget(apply_btn)
+        cl.addWidget(reset_btn)
+        row.addWidget(crop)
+        self.prop_widgets["aspect"] = crop
 
-        self.hint = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, width_chars=10)
-        self.hint.get_style_context().add_class("catcap-dim")
-        bar.pack_start(self.hint, True, True, 0)
+        self.image_ops = QWidget()
+        ol = QHBoxLayout(self.image_ops)
+        ol.setContentsMargins(0, 0, 0, 0)
+        ol.setSpacing(0)
+        for icon, tip, op in (("rotate-left", "Rotate left", "rotate_ccw"), ("rotate-right", "Rotate right", "rotate_cw"),
+                              ("flip-h", "Flip horizontally", "flip_h"), ("flip-v", "Flip vertically", "flip_v")):
+            ol.addWidget(self._icon_btn(icon, tip, lambda o=op: self.image_op(o)))
+        ol.addWidget(self._icon_btn("resize", "Resize image…", self.resize_dialog))
+        row.addWidget(self.image_ops)
+        self.hint = QLabel()
+        self.hint.setStyleSheet("color: #8E959C;")
+        row.addWidget(self.hint)
+        return props
 
-        ops = Gtk.Box(spacing=0)
-        ops.get_style_context().add_class("linked")
-        for icon, tip, op in (("object-rotate-left-symbolic", "Rotate left", "rotate_ccw"),
-                              ("object-rotate-right-symbolic", "Rotate right", "rotate_cw"),
-                              ("object-flip-horizontal-symbolic", "Flip horizontally", "flip_h"),
-                              ("object-flip-vertical-symbolic", "Flip vertically", "flip_v")):
-            ops.add(self._icon_button(icon, tip, lambda _b, o=op: self.image_op(o)))
-        resize = Gtk.Button(label="Resize…", tooltip_text="Resize image")
-        resize.connect("clicked", lambda *_: self.resize_dialog())
-        ops.add(resize)
-        bar.pack_end(ops, False, False, 0)
-        return bar
+    def eventFilter(self, obj, ev):
+        if obj is self._stage and ev.type() == ev.Type.Resize:
+            self._place_panels()
+        return False
 
-    # ================================================================ tools & props
-    def _on_tool_toggled(self, btn, name):
-        if btn.get_active():
-            self._set_tool(name, from_button=True)
+    def _place_panels(self):
+        w, h = self._stage.width(), self._stage.height()
+        self.dock.adjustSize()
+        dw, dh = self.dock.sizeHint().width(), self.dock.sizeHint().height()
+        self.dock.setGeometry((w - dw) // 2, h - dh - 18, dw, dh)
+        self.props.adjustSize()
+        pw, ph = min(self.props.sizeHint().width(), w - 24), self.props.sizeHint().height()
+        self.props.setGeometry((w - pw) // 2, h - dh - 18 - ph - 8, pw, ph)
+        self.dock.raise_()
+        self.props.raise_()
 
-    def _set_tool(self, name, from_button=False):
+    def _build_menu(self):
+        menu = QMenu(self)
+        for label, cb in (("Rotate left", lambda: self.image_op("rotate_ccw")),
+                          ("Rotate right", lambda: self.image_op("rotate_cw")),
+                          ("Flip horizontally", lambda: self.image_op("flip_h")),
+                          ("Flip vertically", lambda: self.image_op("flip_v")),
+                          ("Resize image…", self.resize_dialog), (None, None),
+                          ("Export as PDF…", lambda: (self._flush_save(), ui.export_pdf_dialog(self, self.library, self.config, [self.capture_id]))),
+                          ("Send by email…", lambda: ui.send_email(self._temp())),
+                          ("Show original in file manager", lambda: ui.show_in_folder(self.library.original_path(self.capture_id))),
+                          (None, None),
+                          ("Revert to original", self.revert),
+                          ("Keyboard shortcuts", lambda: self.app.show_shortcuts(self))):
+            if label is None:
+                menu.addSeparator()
+            else:
+                menu.addAction(label, cb)
+        menu.insertMenu(menu.actions()[7], ui.open_with_menu(menu, self._temp))
+        return menu
+
+    def _temp(self):
+        self._flush_save()
+        return ui.temp_render(self.library, self.capture_id, self.config)
+
+    def _shortcuts(self):
+        bind = [
+            (QKeySequence.StandardKey.Undo, self.undo), (QKeySequence.StandardKey.Redo, self.redo),
+            ("Ctrl+Shift+Z", self.redo), (QKeySequence.StandardKey.Copy, self.copy), ("Ctrl+S", self.export),
+            ("Ctrl+D", self.duplicate), ("Ctrl+0", self.zoom_fit), ("Ctrl+1", lambda: self.set_zoom(1.0)),
+            ("Ctrl++", lambda: self.set_zoom(self.zoom * 1.25)), ("Ctrl+=", lambda: self.set_zoom(self.zoom * 1.25)),
+            ("Ctrl+-", lambda: self.set_zoom(self.zoom / 1.25)), ("Ctrl+]", lambda: self.reorder(1)),
+            ("Ctrl+[", lambda: self.reorder(-1)), ("Ctrl+W", self.close), ("Ctrl+?", lambda: self.app.show_shortcuts(self)),
+            ("Delete", self.delete_selected), ("Backspace", self.delete_selected), ("Escape", self._escape),
+            ("Return", self._enter), ("Enter", self._enter),
+        ]
+        for name, _label, key in TOOLS:
+            bind.append((key, lambda n=name: self.set_tool(n)))
+        for seq, cb in bind:
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WindowShortcut)
+            sc.activated.connect(cb)
+        for key, dx, dy in ((Qt.Key.Key_Left, -1, 0), (Qt.Key.Key_Right, 1, 0), (Qt.Key.Key_Up, 0, -1), (Qt.Key.Key_Down, 0, 1)):
+            for mod, step in ((Qt.KeyboardModifier.NoModifier, 1), (Qt.KeyboardModifier.ShiftModifier, 10)):
+                sc = QShortcut(QKeySequence(mod.value | key.value), self)
+                sc.activated.connect(lambda dx=dx, dy=dy, s=step: self.nudge(dx * s, dy * s))
+
+    # ------------------------------------------------------------ tools and properties
+    def set_tool(self, name):
         if self.tool == "crop" and name != "crop":
             self.crop_draft = None
         self.tool = name
-        if not from_button:
-            self.tool_buttons[name].set_active(True)
+        self.tool_buttons[name].setChecked(True)
         if name == "crop":
-            w, h = self.doc.transformed_size(self.src.get_width(), self.src.get_height())
+            w, h = self.doc.transformed_size(self.src.width(), self.src.height())
             self.crop_draft = list(self.doc.crop) if self.doc.crop else [0, 0, w, h]
             self.selected = None
+            self.fit_mode = True
+            self._update_canvas_size()
+            QTimer.singleShot(0, self.zoom_fit)
         elif name != "select":
             self.selected = None
-        self.tool_label.set_text(dict((t, tip.split(" (")[0].split(":")[0]) for t, tip, _k in TOOLS)[name])
-        hints = {
-            "select": "Click an object to select it; drag to move; Delete removes it; double-click edits text",
-            "arrow": "Drag to draw · Shift snaps to 45°",
-            "line": "Drag to draw · Shift snaps to 45°",
-            "rect": "Drag to draw · Shift makes a square",
-            "ellipse": "Drag to draw · Shift makes a circle",
-            "text": "Click where the text should go",
-            "callout": "Drag from the point of interest to where the bubble goes",
-            "highlighter": "Drag to highlight",
-            "pen": "Drag to draw freehand",
-            "step": "Click to place the next number",
-            "blur": "Drag over sensitive content",
-            "pixelate": "Drag over sensitive content",
-            "spotlight": "Drag areas to keep bright; the rest is dimmed",
-            "crop": "Drag to choose the area · Enter applies · Esc cancels",
-        }
-        self.hint.set_text(hints.get(name, ""))
+        self.tool_label.setText(dict((t, l) for t, l, _k in TOOLS)[name])
+        self.hint.setText(HINTS.get(name, ""))
         self._load_props(self.styles.get(name, {}))
-        self._sync_props_visibility()
-        cursor = "default" if name == "select" else "crosshair"
-        if name == "text":
-            cursor = "text"
-        win = self.canvas.get_window()
-        if win is not None:
-            win.set_cursor(Gdk.Cursor.new_from_name(self.get_display(), cursor))
-        self.canvas.queue_draw()
+        self._sync_props()
+        cursor = {"select": Qt.CursorShape.ArrowCursor, "text": Qt.CursorShape.IBeamCursor}.get(name, Qt.CursorShape.CrossCursor)
+        self.canvas.setCursor(cursor)
+        self.canvas.update()
 
-    def _sync_props_visibility(self):
+    def _sync_props(self):
         kind = self.selected["type"] if (self.tool == "select" and self.selected) else self.tool
-        wanted = PROPS_FOR.get(kind, set())
-        for key, wrap in self.prop_widgets.items():
-            wrap.set_visible(key in wanted)
+        wanted = PROPS_FOR.get(kind, [])
+        for key, box in self.prop_widgets.items():
+            box.setVisible(key in wanted)
+        self.image_ops.setVisible(kind == "select" or self.tool == "crop")
+        self.hint.setVisible(not wanted or kind in ("select", "crop"))
+        if self.tool == "select" and self.selected:
+            self.tool_label.setText(dict((t, l) for t, l, _k in TOOLS).get(kind, kind))
+        QTimer.singleShot(0, self._place_panels)
 
     def _load_props(self, style: dict):
-        self._updating_props = True
+        self._loading_props = True
         try:
             if "color" in style:
-                rgba = Gdk.RGBA()
-                rgba.parse(style["color"])
-                self.color_btn.set_rgba(rgba)
+                self.color_btn.set_color(style["color"])
             if "width" in style:
-                self.width_spin.set_value(style["width"])
+                self.width_spin.setValue(int(round(style["width"])))
             if "size" in style:
-                self.size_spin.set_value(style["size"])
+                self.size_spin.setValue(int(round(style["size"])))
             if "style" in style:
-                self.style_combo.set_active_id(style["style"])
+                self.style_combo.setCurrentIndex(1 if style["style"] == "letter" else 0)
             if "font" in style:
-                self.font_btn.set_font(f"{style['font']} {int(style.get('font_size', 22))}")
+                self.font_btn.setText(f"{style['font']} · {int(style.get('font_size', 22))}px")
             if "strength" in style:
-                self.strength_spin.set_value(style["strength"])
-            self.fill_check.set_active(bool(style.get("fill")))
-            self.bg_check.set_active(bool(style.get("bg")))
-            self.dashed_check.set_active(bool(style.get("dashed")))
-            self.shadow_check.set_active(bool(style.get("shadow")))
-            self.opacity_scale.set_value(100 * style.get("opacity", 1.0))
+                self.strength_spin.setValue(int(round(style["strength"])))
+            self.fill_check.setChecked(bool(style.get("fill")))
+            self.bg_check.setChecked(bool(style.get("bg")))
+            self.dashed_check.setChecked(bool(style.get("dashed")))
+            self.shadow_check.setChecked(bool(style.get("shadow")))
+            self.opacity.setValue(int(100 * style.get("opacity", 1.0)))
         finally:
-            self._updating_props = False
+            self._loading_props = False
 
-    def _read_prop(self, key):
-        if key == "color":
-            c = self.color_btn.get_rgba()
-            return {"color": "#%02x%02x%02x" % (int(c.red * 255), int(c.green * 255), int(c.blue * 255))}
-        if key == "width":
-            return {"width": self.width_spin.get_value()}
-        if key == "size":
-            return {"size": self.size_spin.get_value()}
-        if key == "style":
-            return {"style": self.style_combo.get_active_id() or "number"}
-        if key == "font":
-            desc = self.font_btn.get_font_desc()
-            size = desc.get_size() / 1024 if desc.get_size() else 22
-            desc.unset_fields(Pango.FontMask.SIZE)
-            return {"font": desc.to_string(), "font_size": max(8, size * 1.33)}
-        if key == "strength":
-            return {"strength": self.strength_spin.get_value()}
-        if key == "fill":
-            return {"fill": self.fill_check.get_active()}
-        if key == "bg":
-            return {"bg": self.bg_check.get_active()}
-        if key == "dashed":
-            return {"dashed": self.dashed_check.get_active()}
-        if key == "shadow":
-            return {"shadow": self.shadow_check.get_active()}
-        if key == "opacity":
-            return {"opacity": self.opacity_scale.get_value() / 100}
-        return {}
+    def _pick_font(self):
+        target = self.selected if (self.tool == "select" and self.selected) else self.styles.get(self.tool, {})
+        font = render.item_font(target)
+        font.setPointSizeF(max(6.0, target.get("font_size", 22) * 0.75))
+        font, ok = QFontDialog.getFont(font, self, "Font")
+        if ok:
+            family = font.family() + (" Bold" if font.bold() else "") + (" Italic" if font.italic() else "")
+            size = font.pointSizeF() / 0.75 if font.pointSizeF() > 0 else font.pixelSize()
+            self._prop_changed({"font": family, "font_size": round(size)})
+            self.font_btn.setText(f"{family} · {round(size)}px")
 
-    def _prop_changed(self, key):
-        if self._updating_props:
+    def _prop_changed(self, values: dict):
+        if self._loading_props:
             return
-        values = self._read_prop(key)
         if self.tool == "select" and self.selected is not None:
             self._checkpoint()
             self.selected.update(values)
-            if self.selected["type"] in ("text", "callout"):
+            if self.selected["type"] in ann.BOX_KINDS:
                 render.measure_text(self.selected)
             self._commit()
             kind = self.selected["type"]
@@ -448,232 +668,140 @@ class Editor(Gtk.ApplicationWindow):
             self.styles[kind].update(values)
             self.config.set("editor", "styles", json.dumps(self.styles))
 
-    def _on_aspect(self, combo):
-        self.aspect = ASPECTS[combo.get_active()][1]
+    def _on_aspect(self, index):
+        self.aspect = ASPECTS[index][1]
         if self.crop_draft and self.aspect:
-            x, y, w, h = self.crop_draft
-            self.crop_draft = self._clamp_rect([x, y, w, w / self.aspect])
-        self.canvas.queue_draw()
+            x, y, w, _h = self.crop_draft
+            self.crop_draft = self._clamp([x, y, w, w / self.aspect])
+        self.canvas.update()
 
-    # ================================================================ document / history
+    # ------------------------------------------------------------ document and history
     def _checkpoint(self):
         self.undo_stack.append(self.doc.to_json())
-        if len(self.undo_stack) > 500:
-            self.undo_stack.pop(0)
+        del self.undo_stack[:-500]
         self.redo_stack.clear()
 
     def _restore(self, text):
-        sel_index = self.doc.items.index(self.selected) if self.selected in self.doc.items else None
+        index = self.doc.items.index(self.selected) if self.selected in self.doc.items else None
         self.doc = Document.from_json(text)
-        self.selected = self.doc.items[sel_index] if sel_index is not None and sel_index < len(self.doc.items) else None
+        self.selected = self.doc.items[index] if index is not None and index < len(self.doc.items) else None
         self._rebuild_base()
         self._schedule_save()
 
-    def undo(self, *_):
+    def undo(self):
         if self.undo_stack:
             self.redo_stack.append(self.doc.to_json())
             self._restore(self.undo_stack.pop())
 
-    def redo(self, *_):
+    def redo(self):
         if self.redo_stack:
             self.undo_stack.append(self.doc.to_json())
             self._restore(self.redo_stack.pop())
 
     def _commit(self):
-        """Document changed: re-render and schedule autosave (EDT-07)."""
         self._render_items()
         self._schedule_save()
 
     def _schedule_save(self):
-        if self._save_source:
-            GLib.source_remove(self._save_source)
-        self._save_source = GLib.timeout_add(500, self._save_now)
+        self._save_timer.start()
         self._update_buttons()
 
     def _save_now(self):
-        self._save_source = 0
         try:
             self.library.save_doc(self.capture_id, self.doc)
         except Exception as exc:
-            self.status.set_text(f"Could not save: {exc}")
-        return False
+            self.status.setText(f"Could not save: {exc}")
+
+    def _flush_save(self):
+        if self._save_timer.isActive():
+            self._save_timer.stop()
+            self._save_now()
 
     def _rebuild_base(self):
-        self.base = render.transformed_surface(self.src, self.doc)
+        self.base = render.transformed_image(self.src, self.doc)
         self._render_items()
+        self._update_canvas_size()
         if self.fit_mode:
-            GLib.idle_add(self.zoom_fit)
-        else:
-            self._update_canvas_size()
+            QTimer.singleShot(0, self.zoom_fit)
 
     def _render_items(self, exclude=None):
-        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.base.get_width(), self.base.get_height())
-        ctx = cairo.Context(surface)
-        ctx.set_source_surface(self.base, 0, 0)
-        ctx.set_operator(cairo.OPERATOR_SOURCE)
-        ctx.paint()
-        items = [i for i in self.doc.items if i is not exclude]
-        render.draw_items(surface, items)
-        self.rendered = surface
+        image = self.base.copy()
+        render.draw_items(image, [i for i in self.doc.items if i is not exclude])
+        self.rendered = image
         self._update_buttons()
         self._update_status()
-        self.canvas.queue_draw()
+        self.canvas.update()
 
     def _update_buttons(self):
-        self.undo_btn.set_sensitive(bool(self.undo_stack))
-        self.redo_btn.set_sensitive(bool(self.redo_stack))
+        self.undo_btn.setEnabled(bool(self.undo_stack))
+        self.redo_btn.setEnabled(bool(self.redo_stack))
 
     def _update_title(self):
-        self.set_title(f"{self.cap.name} — CatCap")
+        self.title.setText(self.cap.name)
+        self.setWindowTitle(f"{self.cap.name} – CatCap")
 
     def _update_status(self, pos=None):
-        w, h = self.doc.output_size(self.src.get_width(), self.src.get_height())
-        text = f"{w} × {h} px"
-        if self.doc.items:
-            text += f"  ·  {len(self.doc.items)} annotation{'s' if len(self.doc.items) != 1 else ''}"
+        w, h = self.doc.output_size(self.src.width(), self.src.height())
+        parts = [f"{w} × {h} px"]
+        n = len(self.doc.items)
+        if n:
+            parts.append(f"{n} annotation{'s' if n != 1 else ''}")
         if pos:
-            text += f"  ·  {int(pos[0])}, {int(pos[1])}"
-        self.status.set_text(text)
+            parts.append(f"{int(pos[0])}, {int(pos[1])}")
+        self.status.setText("     ".join(parts))
 
-    def render_output(self):
+    def render_output(self) -> QImage:
         return render.render(self.src, self.doc)
 
-    # ================================================================ view mapping
-    def _view_rect(self):
-        """(cx, cy, w, h): part of the transformed image currently shown."""
-        tw, th = self.base.get_width(), self.base.get_height()
+    # ------------------------------------------------------------ view
+    def view_rect(self):
+        tw, th = self.base.width(), self.base.height()
         if self.doc.crop and self.tool != "crop":
-            x, y, w, h = self.doc.crop
-            return x, y, w, h
+            return tuple(self.doc.crop)
         return 0, 0, tw, th
-
-    def _origin(self):
-        _cx, _cy, w, h = self._view_rect()
-        alloc = self.canvas.get_allocation()
-        return max(0, (alloc.width - w * self.zoom) / 2), max(0, (alloc.height - h * self.zoom) / 2)
-
-    def to_doc(self, vx, vy):
-        cx, cy, _w, _h = self._view_rect()
-        ox, oy = self._origin()
-        return (vx - ox) / self.zoom + cx, (vy - oy) / self.zoom + cy
 
     def set_zoom(self, z, fit=False):
         self.fit_mode = fit
         self.zoom = max(0.05, min(z, 16.0))
-        self.zoom_label.set_label(f"{round(self.zoom * 100)}%")
+        self.zoom_btn.setText(f"{round(self.zoom * 100)}%")
         self._update_canvas_size()
 
     def zoom_fit(self):
-        _cx, _cy, w, h = self._view_rect()
-        alloc = self.scroller.get_allocation()
-        if alloc.width < 50:
-            return False
-        z = min((alloc.width - 24) / w, (alloc.height - 24) / h, 1.0)
-        self.set_zoom(z, fit=True)
-        return False
+        _cx, _cy, w, h = self.view_rect()
+        vp = self.scroll.viewport().size()
+        if vp.width() < 50:
+            return
+        dock_h = self.dock.height() + self.props.height() + 40
+        self.set_zoom(min((vp.width() - 64) / w, (vp.height() - 48 - dock_h) / h, 1.0), fit=True)
 
     def _update_canvas_size(self):
-        _cx, _cy, w, h = self._view_rect()
-        self.canvas.set_size_request(int(w * self.zoom) + 2, int(h * self.zoom) + 2)
-        self.canvas.queue_draw()
+        self.canvas.setMinimumSize(self.canvas.sizeHint())
+        self.canvas.updateGeometry()
+        self.canvas.update()
 
-    def _on_canvas_allocate(self, *_):
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
         if self.fit_mode:
-            GLib.idle_add(self.zoom_fit)
+            QTimer.singleShot(0, self.zoom_fit)
 
-    # ================================================================ drawing
-    def _on_draw(self, _w, cr):
-        cx, cy, w, h = self._view_rect()
-        ox, oy = self._origin()
-        cr.save()
-        cr.translate(ox, oy)
-        cr.scale(self.zoom, self.zoom)
-        cr.translate(-cx, -cy)
-        cr.rectangle(cx, cy, w, h)
-        cr.clip()
-        cr.set_source_surface(self.rendered, 0, 0)
-        cr.get_source().set_filter(cairo.FILTER_NEAREST if self.zoom >= 2 else cairo.FILTER_GOOD)
-        cr.paint()
-        if self.active is not None:
-            kind = self.active["type"]
-            if kind in ann.EFFECT_KINDS or kind == "spotlight":
-                self._dashed_rect(cr, ann.bbox(self.active))
-            else:
-                render.draw_item(cr, self.active)
-        if self.selected is not None and self.tool == "select":
-            x, y, bw, bh = ann.bbox(self.selected)
-            pad = 4 / self.zoom
-            self._dashed_rect(cr, (x - pad, y - pad, bw + 2 * pad, bh + 2 * pad))
-            for _n, hx, hy in ann.handles(self.selected):
-                self._handle(cr, hx, hy)
-        if self.tool == "crop" and self.crop_draft:
-            x, y, bw, bh = self.crop_draft
-            cr.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
-            cr.rectangle(cx, cy, w, h)
-            cr.rectangle(x, y, bw, bh)
-            cr.set_source_rgba(0, 0, 0, 0.5)
-            cr.fill()
-            cr.set_source_rgba(1, 1, 1, 0.9)
-            cr.set_line_width(1.5 / self.zoom)
-            cr.rectangle(x, y, bw, bh)
-            cr.stroke()
-            cr.set_source_rgba(1, 1, 1, 0.35)
-            for i in (1, 2):
-                cr.move_to(x + bw * i / 3, y)
-                cr.line_to(x + bw * i / 3, y + bh)
-                cr.move_to(x, y + bh * i / 3)
-                cr.line_to(x + bw, y + bh * i / 3)
-            cr.stroke()
-            for _n, hx, hy in self._crop_handles():
-                self._handle(cr, hx, hy)
-        cr.restore()
-
-    def _dashed_rect(self, cr, rect):
-        cr.save()
-        cr.set_line_width(1.5 / self.zoom)
-        cr.set_dash([5 / self.zoom, 4 / self.zoom])
-        cr.rectangle(*rect)
-        cr.set_source_rgb(1, 1, 1)
-        cr.stroke_preserve()
-        cr.set_dash([5 / self.zoom, 4 / self.zoom], 5 / self.zoom)
-        cr.set_source_rgb(0.2, 0.45, 0.9)
-        cr.stroke()
-        cr.restore()
-
-    def _handle(self, cr, x, y):
-        r = 5 / self.zoom
-        cr.rectangle(x - r, y - r, 2 * r, 2 * r)
-        cr.set_source_rgb(1, 1, 1)
-        cr.fill_preserve()
-        cr.set_source_rgb(0.2, 0.45, 0.9)
-        cr.set_line_width(1.5 / self.zoom)
-        cr.stroke()
-
-    def _crop_handles(self):
-        if not self.crop_draft:
-            return []
-        return ann.handles({"type": "rect", "x": self.crop_draft[0], "y": self.crop_draft[1],
-                            "w": self.crop_draft[2], "h": self.crop_draft[3]})
-
-    # ================================================================ mouse
+    # ------------------------------------------------------------ mouse
     def _hit_handle(self, handles, x, y):
-        tol = 8 / self.zoom
+        tol = 9 / self.zoom
         for name, hx, hy in handles:
             if abs(x - hx) <= tol and abs(y - hy) <= tol:
                 return name
         return None
 
     def _item_at(self, x, y):
-        tol = 6 / self.zoom
         for item in reversed(self.doc.items):
-            if ann.hit_test(item, x, y, tol):
+            if ann.hit_test(item, x, y, 6 / self.zoom):
                 return item
         return None
 
     def _new_item(self, kind, x, y):
         style = copy.deepcopy(self.styles.get(kind, {}))
         if kind == "callout":
-            return {"type": kind, "x": x, "y": y, "text": "", **style}
+            return {"type": kind, "x": x, "y": y, "text": "…", "tail": [x, y], **style}
         if kind in ann.LINE_KINDS:
             return {"type": kind, "x1": x, "y1": y, "x2": x, "y2": y, **style}
         if kind in ann.RECT_KINDS:
@@ -682,25 +810,16 @@ class Editor(Gtk.ApplicationWindow):
             return {"type": kind, "points": [[x, y]], **style}
         return {"type": kind, "x": x, "y": y, **style}
 
-    def _on_press(self, _w, ev):
-        self.canvas.grab_focus()
-        x, y = self.to_doc(ev.x, ev.y)
-        if ev.button == 2 or (ev.button == 1 and ev.state & Gdk.ModifierType.MOD1_MASK):
-            self._pan = (ev.x_root, ev.y_root, self.scroller.get_hadjustment().get_value(),
-                         self.scroller.get_vadjustment().get_value())
-            return True
-        if ev.button == 3:
-            self._context_menu(ev, x, y)
-            return True
-        if ev.button != 1:
-            return True
-        if ev.type == Gdk.EventType._2BUTTON_PRESS:
-            item = self._item_at(x, y)
-            if item is not None and item["type"] in ann.BOX_KINDS:
-                self.edit_text(item)
-            elif self.tool == "crop":
-                self.apply_crop()
-            return True
+    def on_press(self, ev):
+        x, y = self.canvas.to_doc(ev.position())
+        btn = ev.button()
+        if btn == Qt.MouseButton.MiddleButton or (btn == Qt.MouseButton.LeftButton
+                                                   and ev.modifiers() & Qt.KeyboardModifier.AltModifier):
+            self._pan = (ev.globalPosition(), self.scroll.horizontalScrollBar().value(),
+                         self.scroll.verticalScrollBar().value())
+            return
+        if btn != Qt.MouseButton.LeftButton:
+            return
         tool = self.tool
         if tool == "select":
             if self.selected is not None:
@@ -709,30 +828,30 @@ class Editor(Gtk.ApplicationWindow):
                     self._checkpoint()
                     self.drag = {"mode": "handle", "name": handle}
                     self._begin_live(self.selected)
-                    return True
+                    return
             item = self._item_at(x, y)
             self.selected = item
             self._load_props(item or {})
-            self._sync_props_visibility()
+            self._sync_props()
             if item is not None:
                 self._checkpoint()
                 self.drag = {"mode": "move", "last": (x, y), "moved": False}
                 self._begin_live(item)
-            self.canvas.queue_draw()
-            return True
+            self.canvas.update()
+            return
         if tool == "crop":
             handle = self._hit_handle(self._crop_handles(), x, y)
             if handle:
                 self.drag = {"mode": "crop-handle", "name": handle}
-            elif self.crop_draft and self._in_rect(self.crop_draft, x, y):
+            elif self.crop_draft and QRectF(*self.crop_draft).contains(QPointF(x, y)):
                 self.drag = {"mode": "crop-move", "last": (x, y)}
             else:
                 self.drag = {"mode": "crop-new", "start": (x, y)}
                 self.crop_draft = [x, y, 0, 0]
-            return True
+            return
         if tool == "text":
             self.add_text(x, y)
-            return True
+            return
         if tool == "step":
             self._checkpoint()
             item = self._new_item("step", x, y)
@@ -740,23 +859,22 @@ class Editor(Gtk.ApplicationWindow):
             self.doc.items.append(item)
             self.selected = item
             self._commit()
-            return True
-        item = self._new_item(tool, x, y)
-        if tool == "callout":
-            item["tail"] = [x, y]
-            item["text"] = "…"
-        self.active = item
+            return
+        self.active = self._new_item(tool, x, y)
         self.drag = {"mode": "create", "start": (x, y)}
-        return True
-
-    def _in_rect(self, rect, x, y):
-        return rect[0] <= x <= rect[0] + rect[2] and rect[1] <= y <= rect[1] + rect[3]
 
     def _begin_live(self, item):
         self.active = item
         self._render_items(exclude=item)
 
-    def _constrain(self, sx, sy, x, y, shift, kind):
+    def _crop_handles(self):
+        if not self.crop_draft:
+            return []
+        x, y, w, h = self.crop_draft
+        return ann.handles({"type": "rect", "x": x, "y": y, "w": w, "h": h})
+
+    @staticmethod
+    def _constrain(sx, sy, x, y, shift, kind):
         if not shift:
             return x, y
         dx, dy = x - sx, y - sy
@@ -767,22 +885,30 @@ class Editor(Gtk.ApplicationWindow):
         side = max(abs(dx), abs(dy))
         return sx + math.copysign(side, dx or 1), sy + math.copysign(side, dy or 1)
 
-    def _on_motion(self, _w, ev):
-        x, y = self.to_doc(ev.x, ev.y)
-        self._update_status((x, y))
+    def _clamp(self, rect, keep_size=False):
+        tw, th = self.base.width(), self.base.height()
+        x, y, w, h = rect
+        if keep_size:
+            return [max(0, min(x, tw - w)), max(0, min(y, th - h)), w, h]
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(tw, x + w), min(th, y + h)
+        return [x1, y1, max(0, x2 - x1), max(0, y2 - y1)]
+
+    def on_motion(self, ev):
+        x, y = self.canvas.to_doc(ev.position())
         if self._pan is not None:
-            rx, ry, hv, vv = self._pan
-            self.scroller.get_hadjustment().set_value(hv - (ev.x_root - rx))
-            self.scroller.get_vadjustment().set_value(vv - (ev.y_root - ry))
-            return True
+            start, hv, vv = self._pan
+            d = ev.globalPosition() - start
+            self.scroll.horizontalScrollBar().setValue(int(hv - d.x()))
+            self.scroll.verticalScrollBar().setValue(int(vv - d.y()))
+            return
         if not self.drag:
             if self.tool == "select":
                 over = self._item_at(x, y) is not None or (
                     self.selected is not None and self._hit_handle(ann.handles(self.selected), x, y))
-                win = self.canvas.get_window()
-                win.set_cursor(Gdk.Cursor.new_from_name(self.get_display(), "move" if over else "default"))
-            return True
-        shift = bool(ev.state & Gdk.ModifierType.SHIFT_MASK)
+                self.canvas.setCursor(Qt.CursorShape.SizeAllCursor if over else Qt.CursorShape.ArrowCursor)
+            return
+        shift = bool(ev.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         mode = self.drag["mode"]
         if mode == "create" and self.active is not None:
             sx, sy = self.drag["start"]
@@ -801,65 +927,51 @@ class Editor(Gtk.ApplicationWindow):
         elif mode == "move":
             lx, ly = self.drag["last"]
             ann.move_item(self.selected, x - lx, y - ly)
-            self.drag["last"] = (x, y)
-            self.drag["moved"] = True
+            self.drag["last"], self.drag["moved"] = (x, y), True
         elif mode == "handle":
             ann.drag_handle(self.selected, self.drag["name"], x, y)
         elif mode == "crop-new":
             sx, sy = self.drag["start"]
             ex, ey = x, y
             if self.aspect:
-                w = abs(ex - sx)
-                ey = sy + math.copysign(w / self.aspect, (ey - sy) or 1)
-            self.crop_draft = self._clamp_rect(ann._norm_rect(sx, sy, ex, ey))
+                ey = sy + math.copysign(abs(ex - sx) / self.aspect, (ey - sy) or 1)
+            self.crop_draft = self._clamp(ann._norm_rect(sx, sy, ex, ey))
         elif mode == "crop-move":
             lx, ly = self.drag["last"]
             cx, cy, cw, ch = self.crop_draft
-            self.crop_draft = self._clamp_rect([cx + x - lx, cy + y - ly, cw, ch], keep_size=True)
+            self.crop_draft = self._clamp([cx + x - lx, cy + y - ly, cw, ch], keep_size=True)
             self.drag["last"] = (x, y)
         elif mode == "crop-handle":
-            item = {"type": "rect", "x": self.crop_draft[0], "y": self.crop_draft[1],
-                    "w": self.crop_draft[2], "h": self.crop_draft[3]}
-            ann.drag_handle(item, self.drag["name"], x, y)
-            rect = [item["x"], item["y"], item["w"], item["h"]]
+            box = {"type": "rect", "x": self.crop_draft[0], "y": self.crop_draft[1],
+                   "w": self.crop_draft[2], "h": self.crop_draft[3]}
+            ann.drag_handle(box, self.drag["name"], x, y)
+            rect = [box["x"], box["y"], box["w"], box["h"]]
             if self.aspect:
                 rect[3] = rect[2] / self.aspect
-            self.crop_draft = self._clamp_rect(rect)
-        self.canvas.queue_draw()
-        return True
+            self.crop_draft = self._clamp(rect)
+        self.canvas.update()
 
-    def _clamp_rect(self, rect, keep_size=False):
-        tw, th = self.base.get_width(), self.base.get_height()
-        x, y, w, h = rect
-        if keep_size:
-            x = max(0, min(x, tw - w))
-            y = max(0, min(y, th - h))
-            return [x, y, w, h]
-        x1, y1 = max(0, x), max(0, y)
-        x2, y2 = min(tw, x + w), min(th, y + h)
-        return [x1, y1, max(0, x2 - x1), max(0, y2 - y1)]
-
-    def _on_release(self, _w, ev):
+    def on_release(self, ev):
         if self._pan is not None:
             self._pan = None
-            return True
+            return
         if not self.drag:
-            return True
+            return
         mode = self.drag["mode"]
         moved = self.drag.get("moved", True)
         self.drag = None
         if mode == "create" and self.active is not None:
             item, self.active = self.active, None
-            if self._big_enough(item):
-                if item["type"] == "callout":
-                    self._finish_callout(item)
-                    return True
-                self._checkpoint()
-                self.doc.items.append(item)
-                self.selected = item
-                self._commit()
-            else:
-                self.canvas.queue_draw()
+            if not self._big_enough(item):
+                self.canvas.update()
+                return
+            if item["type"] == "callout":
+                self._finish_callout(item)
+                return
+            self._checkpoint()
+            self.doc.items.append(item)
+            self.selected = item
+            self._commit()
         elif mode in ("move", "handle"):
             item, self.active = self.active, None
             if mode == "move" and not moved and self.undo_stack:
@@ -867,117 +979,69 @@ class Editor(Gtk.ApplicationWindow):
             if item is not None and item["type"] in ann.BOX_KINDS:
                 render.measure_text(item)
             self._commit()
-        return True
+
+    def on_double_click(self, ev):
+        x, y = self.canvas.to_doc(ev.position())
+        item = self._item_at(x, y)
+        if item is not None and item["type"] in ann.BOX_KINDS:
+            self.edit_text(item)
+        elif self.tool == "crop":
+            self.apply_crop()
 
     def _big_enough(self, item):
-        kind = item["type"]
         min_px = 3 / self.zoom
-        if kind in ann.LINE_KINDS:
+        if item["type"] in ann.LINE_KINDS:
             return math.hypot(item["x2"] - item["x1"], item["y2"] - item["y1"]) >= min_px
-        if kind in ann.RECT_KINDS:
+        if item["type"] in ann.RECT_KINDS:
             return item["w"] >= min_px and item["h"] >= min_px
-        if kind == "callout":
-            return True
         return True
 
-    def _on_scroll(self, _w, ev):
-        if not ev.state & Gdk.ModifierType.CONTROL_MASK:
-            return False
-        ok, _dx, dy = ev.get_scroll_deltas()
-        direction = -dy if ok and dy else (1 if ev.direction == Gdk.ScrollDirection.UP else -1)
-        self.set_zoom(self.zoom * (1.15 if direction > 0 else 1 / 1.15))
-        return True
-
-    def _context_menu(self, ev, x, y):
+    def context_menu(self, ev):
+        x, y = self.canvas.to_doc(QPointF(ev.pos()))
         item = self._item_at(x, y)
-        menu = Gtk.Menu()
+        menu = QMenu(self)
         if item is not None:
+            self.set_tool("select")
             self.selected = item
-            self._set_tool("select")
-            self.selected = item
-            for label, cb in (("Duplicate", self.duplicate), ("Bring to front", lambda: self.reorder(1)),
-                              ("Send to back", lambda: self.reorder(-1)), ("Delete", self.delete_selected)):
-                mi = Gtk.MenuItem(label=label)
-                mi.connect("activate", lambda _w, c=cb: c())
-                menu.append(mi)
+            self._sync_props()
+            menu.addAction("Duplicate", self.duplicate)
+            menu.addAction("Bring to front", lambda: self.reorder(1))
+            menu.addAction("Send to back", lambda: self.reorder(-1))
             if item["type"] in ann.BOX_KINDS:
-                mi = Gtk.MenuItem(label="Edit text…")
-                mi.connect("activate", lambda *_: self.edit_text(item))
-                menu.append(mi)
+                menu.addAction("Edit text…", lambda: self.edit_text(item))
+            menu.addSeparator()
+            menu.addAction("Delete", self.delete_selected)
         else:
-            for label, cb in (("Copy image", self.copy), ("Export…", self.export),
-                              ("Pin to screen", lambda: self.app.pin_surface(self.render_output()))):
-                mi = Gtk.MenuItem(label=label)
-                mi.connect("activate", lambda _w, c=cb: c())
-                menu.append(mi)
-        menu.show_all()
-        menu.attach_to_widget(self.canvas, None)
-        menu.popup_at_pointer(ev)
-        self.canvas.queue_draw()
+            menu.addAction("Copy image", self.copy)
+            menu.addAction("Export…", self.export)
+            menu.addAction("Pin to screen", lambda: self.app.pin_image(self.render_output()))
+        self.canvas.update()
+        menu.exec(ev.globalPos())
 
-    # ================================================================ keyboard
-    def _on_key(self, _w, ev):
-        focus = self.get_focus()
-        if isinstance(focus, (Gtk.Entry, Gtk.SpinButton, Gtk.TextView)):
-            return False
-        ctrl = bool(ev.state & Gdk.ModifierType.CONTROL_MASK)
-        shift = bool(ev.state & Gdk.ModifierType.SHIFT_MASK)
-        key = Gdk.keyval_to_lower(ev.keyval)
-        if ctrl:
-            actions = {
-                Gdk.KEY_z: self.redo if shift else self.undo,
-                Gdk.KEY_y: self.redo,
-                Gdk.KEY_c: self.copy,
-                Gdk.KEY_s: self.export,
-                Gdk.KEY_d: self.duplicate,
-                Gdk.KEY_0: self.zoom_fit,
-                Gdk.KEY_1: lambda: self.set_zoom(1.0),
-                Gdk.KEY_plus: lambda: self.set_zoom(self.zoom * 1.25),
-                Gdk.KEY_equal: lambda: self.set_zoom(self.zoom * 1.25),
-                Gdk.KEY_minus: lambda: self.set_zoom(self.zoom / 1.25),
-                Gdk.KEY_bracketright: lambda: self.reorder(1),
-                Gdk.KEY_bracketleft: lambda: self.reorder(-1),
-                Gdk.KEY_w: self.close,
-                Gdk.KEY_question: lambda: self.app.show_shortcuts(self),
-                Gdk.KEY_slash: lambda: self.app.show_shortcuts(self),
-            }
-            if key in actions:
-                actions[key]()
-                return True
-            return False
-        if key in (Gdk.KEY_Delete, Gdk.KEY_BackSpace):
-            self.delete_selected()
-            return True
-        if key == Gdk.KEY_Escape:
-            if self.tool == "crop":
-                self._set_tool("select")
-            elif self.active is not None:
-                self.active = None
-                self.drag = None
-                self._render_items()
-            else:
-                self.selected = None
-                self._sync_props_visibility()
-                self.canvas.queue_draw()
-            return True
-        if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.tool == "crop":
+    # ------------------------------------------------------------ keyboard helpers
+    def _escape(self):
+        if self.tool == "crop":
+            self.set_tool("select")
+        elif self.active is not None:
+            self.active, self.drag = None, None
+            self._render_items()
+        else:
+            self.selected = None
+            self._sync_props()
+            self.canvas.update()
+
+    def _enter(self):
+        if self.tool == "crop":
             self.apply_crop()
-            return True
-        if self.selected is not None and key in (Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Up, Gdk.KEY_Down):
-            step = 10 if shift else 1
-            dx = {Gdk.KEY_Left: -step, Gdk.KEY_Right: step}.get(key, 0)
-            dy = {Gdk.KEY_Up: -step, Gdk.KEY_Down: step}.get(key, 0)
-            self._checkpoint()
-            ann.move_item(self.selected, dx, dy)
-            self._commit()
-            return True
-        for name, _tip, shortcut in TOOLS:
-            if ev.string and ev.string.lower() == shortcut:
-                self._set_tool(name)
-                return True
-        return False
 
-    # ================================================================ commands
+    def nudge(self, dx, dy):
+        if self.selected is None:
+            return
+        self._checkpoint()
+        ann.move_item(self.selected, dx, dy)
+        self._commit()
+
+    # ------------------------------------------------------------ commands
     def add_text(self, x, y):
         text = ui.prompt_text(self, "Add text", "Text:", "", multiline=True)
         if not text:
@@ -1026,7 +1090,7 @@ class Editor(Gtk.ApplicationWindow):
         self.selected = None
         if was_step:
             self.doc.renumber_steps()
-        self._sync_props_visibility()
+        self._sync_props()
         self._commit()
 
     def duplicate(self):
@@ -1054,106 +1118,100 @@ class Editor(Gtk.ApplicationWindow):
         self._commit()
 
     def image_op(self, op):
-        ow, oh = self.src.get_width(), self.src.get_height()
+        ow, oh = self.src.width(), self.src.height()
         self._checkpoint()
-        sel_index = self.doc.items.index(self.selected) if self.selected in self.doc.items else None
+        index = self.doc.items.index(self.selected) if self.selected in self.doc.items else None
         {"rotate_cw": self.doc.rotate_cw, "rotate_ccw": self.doc.rotate_ccw,
          "flip_h": self.doc.flip_horizontal, "flip_v": self.doc.flip_vertical}[op](ow, oh)
-        self.selected = self.doc.items[sel_index] if sel_index is not None else None
+        self.selected = self.doc.items[index] if index is not None else None
         self.crop_draft = None
         if self.tool == "crop":
-            self._set_tool("select")
+            self.set_tool("select")
         self.fit_mode = True
         self._rebuild_base()
         self._schedule_save()
 
     def resize_dialog(self):
-        ow, oh = self.src.get_width(), self.src.get_height()
-        tw, th = self.doc.transformed_size(ow, oh)
-        dlg = Gtk.Dialog(title="Resize image", transient_for=self, modal=True)
-        dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
-        dlg.add_button("_Resize", Gtk.ResponseType.OK)
-        dlg.set_default_response(Gtk.ResponseType.OK)
-        grid = Gtk.Grid(column_spacing=8, row_spacing=8, margin=12)
-        pct = Gtk.SpinButton.new_with_range(1, 1600, 1)
-        pct.set_value(100)
-        wspin = Gtk.SpinButton.new_with_range(1, 40000, 1)
-        hspin = Gtk.SpinButton.new_with_range(1, 40000, 1)
-        wspin.set_value(tw)
-        hspin.set_value(th)
-        lock = {"busy": False}
+        tw, th = self.doc.transformed_size(self.src.width(), self.src.height())
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Resize image")
+        form = QFormLayout(dlg)
+        pct, wspin, hspin = QSpinBox(), QSpinBox(), QSpinBox()
+        pct.setRange(1, 1600)
+        pct.setSuffix(" %")
+        pct.setValue(100)
+        for s in (wspin, hspin):
+            s.setRange(1, 40000)
+            s.setSuffix(" px")
+        wspin.setValue(tw)
+        hspin.setValue(th)
+        busy = [False]
 
-        def from_pct(*_):
-            if lock["busy"]:
+        def link(src):
+            if busy[0]:
                 return
-            lock["busy"] = True
-            wspin.set_value(round(tw * pct.get_value() / 100))
-            hspin.set_value(round(th * pct.get_value() / 100))
-            lock["busy"] = False
+            busy[0] = True
+            if src is pct:
+                wspin.setValue(round(tw * pct.value() / 100))
+                hspin.setValue(round(th * pct.value() / 100))
+            elif src is wspin:
+                pct.setValue(round(100 * wspin.value() / tw))
+                hspin.setValue(round(th * wspin.value() / tw))
+            else:
+                pct.setValue(round(100 * hspin.value() / th))
+                wspin.setValue(round(tw * hspin.value() / th))
+            busy[0] = False
 
-        def from_w(*_):
-            if lock["busy"]:
-                return
-            lock["busy"] = True
-            pct.set_value(100 * wspin.get_value() / tw)
-            hspin.set_value(round(th * wspin.get_value() / tw))
-            lock["busy"] = False
-
-        def from_h(*_):
-            if lock["busy"]:
-                return
-            lock["busy"] = True
-            pct.set_value(100 * hspin.get_value() / th)
-            wspin.set_value(round(tw * hspin.get_value() / th))
-            lock["busy"] = False
-
-        pct.connect("value-changed", from_pct)
-        wspin.connect("value-changed", from_w)
-        hspin.connect("value-changed", from_h)
-        for row, (label, widget) in enumerate((("Percent", pct), ("Width (px)", wspin), ("Height (px)", hspin))):
-            grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
-            grid.attach(widget, 1, row, 1, 1)
-        grid.attach(Gtk.Label(label="Aspect ratio is kept. Annotations scale with the image.",
-                              xalign=0, sensitive=False), 0, 3, 2, 1)
-        dlg.get_content_area().add(grid)
-        dlg.show_all()
-        if dlg.run() == Gtk.ResponseType.OK:
-            factor = pct.get_value() / 100
+        for s in (pct, wspin, hspin):
+            s.valueChanged.connect(lambda _v, s=s: link(s))
+        form.addRow("Scale", pct)
+        form.addRow("Width", wspin)
+        form.addRow("Height", hspin)
+        note = QLabel("Aspect ratio is kept. Annotations scale with the image.")
+        note.setProperty("muted", True)
+        form.addRow(note)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        ok = buttons.addButton("Resize", QDialogButtonBox.ButtonRole.AcceptRole)
+        ok.setProperty("accent", True)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        form.addRow(buttons)
+        if dlg.exec():
+            factor = wspin.value() / tw
             if abs(factor - 1) > 1e-6:
                 self._checkpoint()
                 self.doc.set_scale(self.doc.scale * factor)
                 self.fit_mode = True
                 self._rebuild_base()
                 self._schedule_save()
-        dlg.destroy()
 
     def apply_crop(self):
         if not self.crop_draft or self.crop_draft[2] < 2 or self.crop_draft[3] < 2:
             return
         self._checkpoint()
-        tw, th = self.base.get_width(), self.base.get_height()
+        tw, th = self.base.width(), self.base.height()
         x, y, w, h = [round(v) for v in self.crop_draft]
         self.doc.crop = None if (x, y, w, h) == (0, 0, tw, th) else [x, y, w, h]
         self.crop_draft = None
-        self._set_tool("select")
+        self.set_tool("select")
         self.fit_mode = True
         self._commit()
-        GLib.idle_add(self.zoom_fit)
+        self._update_canvas_size()
+        QTimer.singleShot(0, self.zoom_fit)
 
     def reset_crop(self):
         if self.doc.crop:
             self._checkpoint()
             self.doc.crop = None
             self._commit()
-        tw, th = self.base.get_width(), self.base.get_height()
-        self.crop_draft = [0, 0, tw, th]
-        self.canvas.queue_draw()
+        self.crop_draft = [0, 0, self.base.width(), self.base.height()]
+        self.canvas.update()
 
     def revert(self):
         if self.doc.is_empty():
             return
         if not ui.ask(self, "Revert to original?", "All annotations and image changes are removed. You can undo this.",
-                      "_Revert", destructive=True):
+                      "Revert", destructive=True):
             return
         self._checkpoint()
         self.doc = Document()
@@ -1163,33 +1221,59 @@ class Editor(Gtk.ApplicationWindow):
         self._schedule_save()
 
     def copy(self):
-        ui.copy_surface(self.render_output())
-        self.status.set_text("Copied to clipboard")
+        ui.copy_image(self.render_output())
+        self.status.setText("Copied to the clipboard")
 
     def export(self):
         self._flush_save()
         ui.export_dialog(self, self.library, self.config, [self.capture_id])
 
-    def _flush_save(self):
-        if self._save_source:
-            GLib.source_remove(self._save_source)
-            self._save_now()
-
-    def _on_drag_data_get(self, _w, _ctx, selection, _info, _time):
+    def closeEvent(self, ev):
         self._flush_save()
-        path = ui.temp_render(self.library, self.capture_id, self.config)
-        selection.set_uris([ui.file_uri(path)])
-
-    def _on_delete(self, *_):
-        self._flush_save()
-        return False
+        super().closeEvent(ev)
 
     def _on_library_event(self, kind, ids):
-        if self.capture_id in ids and kind in ("changed",):
+        if self.capture_id not in ids:
+            return
+        if kind == "changed":
             try:
                 self.cap = self.library.get(self.capture_id)
                 self._update_title()
             except KeyError:
                 pass
-        if self.capture_id in ids and kind in ("deleted",):
-            self.destroy()
+        elif kind == "deleted":
+            self.close()
+
+
+class DragHandle(QToolButton):
+    """Drag this into another app to drop the edited image there."""
+
+    def __init__(self, editor: Editor):
+        super().__init__()
+        self.ed = editor
+        self.setIcon(editor.theme.icon("drag", BAR_ICON, 20))
+        self.setText(" Drag")
+        self.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.setToolTip("Drag into a file manager, browser or chat to share the edited image")
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self._start = None
+
+    def mousePressEvent(self, ev):
+        self._start = ev.position()
+
+    def mouseMoveEvent(self, ev):
+        if self._start is None or (ev.position() - self._start).manhattanLength() < 8:
+            return
+        self._start = None
+        self.ed._flush_save()
+        drag = QDrag(self)
+        drag.setMimeData(ui.drag_mime(self.ed.library, [self.ed.capture_id], self.ed.config, with_ids=False))
+        thumb = render.scale_to_fit(self.ed.render_output(), 160, 120)
+        from PyQt6.QtGui import QPixmap
+
+        drag.setPixmap(QPixmap.fromImage(thumb))
+        drag.exec(Qt.DropAction.CopyAction)
+
+    def mouseReleaseEvent(self, ev):
+        self._start = None
+

@@ -4,218 +4,228 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import gi
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QKeySequence
+from PyQt6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout,
+                             QKeySequenceEdit, QLabel, QLineEdit, QPushButton, QSpinBox, QTabWidget, QToolButton,
+                             QVBoxLayout, QWidget)
 
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk  # noqa: E402
+from . import hotkeys, ui
 
-from . import hotkeys, ui  # noqa: E402
-
-AFTER_ACTIONS = [("toolbar", "Show quick toolbar"), ("editor", "Open in editor"),
-                 ("clipboard", "Copy to clipboard"), ("library", "Save to library only")]
+AFTER_ACTIONS = [("toolbar", "Show the quick bar"), ("editor", "Open the editor"),
+                 ("clipboard", "Copy to the clipboard"), ("library", "Just save to the library")]
 FORMATS = [("png", "PNG"), ("jpg", "JPG"), ("webp", "WebP"), ("bmp", "BMP")]
+THEMES = [("system", "Follow the system"), ("light", "Light"), ("dark", "Dark")]
 
 
-class SettingsWindow(Gtk.Window):
+class SettingsWindow(QDialog):
     def __init__(self, app, parent=None):
-        super().__init__(title="CatCap Settings", transient_for=parent)
+        super().__init__(parent)
         self.app = app
         self.config = app.config
-        self.set_default_size(640, 560)
-        self.set_icon_name("io.github.kothf.CatCap")
-        header = Gtk.HeaderBar(show_close_button=True, title="Settings")
-        self.set_titlebar(header)
-        notebook = Gtk.Notebook()
-        self.add(notebook)
+        self.setWindowTitle("CatCap settings")
+        self.setWindowIcon(app.app_icon)
+        self.resize(720, 560)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(18, 14, 18, 14)
+        tabs = QTabWidget()
         for title, builder in (("General", self._general), ("Capture", self._capture), ("Hotkeys", self._hotkeys),
-                               ("Library", self._library), ("Output", self._output)):
+                               ("Library", self._library), ("Export", self._output)):
             page = builder()
-            page.set_border_width(16)
-            notebook.append_page(page, Gtk.Label(label=title))
-        self.show_all()
+            page.setContentsMargins(6, 16, 6, 6)
+            tabs.addTab(page, title)
+        lay.addWidget(tabs)
+        close = QPushButton("Done")
+        close.setProperty("accent", True)
+        close.clicked.connect(self.close)
+        lay.addWidget(close, 0, Qt.AlignmentFlag.AlignRight)
 
     # ------------------------------------------------------------ helpers
-    def _grid(self):
-        return Gtk.Grid(column_spacing=12, row_spacing=10)
+    def _form(self):
+        w = QWidget()
+        form = QFormLayout(w)
+        form.setHorizontalSpacing(24)
+        form.setVerticalSpacing(12)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        return w, form
 
-    def _switch(self, grid, row, label, section, key, on_change=None, hint=None):
-        lbl = Gtk.Label(label=label, xalign=0, hexpand=True)
-        sw = Gtk.Switch(active=bool(self.config.get(section, key)), halign=Gtk.Align.END)
+    def _check(self, form, label, section, key, on_change=None, hint=None):
+        box = QCheckBox(label)
+        box.setChecked(bool(self.config.get(section, key)))
 
-        def changed(w, _p):
-            self.config.set(section, key, w.get_active())
+        def changed(v):
+            self.config.set(section, key, bool(v))
             if on_change:
                 on_change()
 
-        sw.connect("notify::active", changed)
-        grid.attach(lbl, 0, row, 1, 1)
-        grid.attach(sw, 1, row, 1, 1)
+        box.toggled.connect(changed)
+        form.addRow(box)
         if hint:
-            h = Gtk.Label(label=hint, xalign=0, wrap=True, max_width_chars=70)
-            h.get_style_context().add_class("catcap-dim")
-            grid.attach(h, 0, row + 1, 2, 1)
-            return row + 2
-        return row + 1
+            h = QLabel(hint)
+            h.setObjectName("muted")
+            h.setWordWrap(True)
+            h.setContentsMargins(28, 0, 0, 0)
+            form.addRow(h)
+        return box
 
-    def _combo(self, grid, row, label, section, key, options):
-        combo = Gtk.ComboBoxText(halign=Gtk.Align.END)
+    def _combo(self, form, label, section, key, options, on_change=None):
+        combo = QComboBox()
         for k, text in options:
-            combo.append(k, text)
-        combo.set_active_id(str(self.config.get(section, key)))
-        combo.connect("changed", lambda c: self.config.set(section, key, c.get_active_id()))
-        grid.attach(Gtk.Label(label=label, xalign=0, hexpand=True), 0, row, 1, 1)
-        grid.attach(combo, 1, row, 1, 1)
-        return row + 1
+            combo.addItem(text, k)
+        combo.setCurrentIndex(max(0, combo.findData(str(self.config.get(section, key)))))
 
-    def _spin(self, grid, row, label, section, key, lo, hi):
-        spin = Gtk.SpinButton.new_with_range(lo, hi, 1)
-        spin.set_value(self.config.get(section, key))
-        spin.set_halign(Gtk.Align.END)
-        spin.connect("value-changed", lambda s: self.config.set(section, key, int(s.get_value())))
-        grid.attach(Gtk.Label(label=label, xalign=0, hexpand=True), 0, row, 1, 1)
-        grid.attach(spin, 1, row, 1, 1)
-        return row + 1
+        def changed(_i):
+            self.config.set(section, key, combo.currentData())
+            if on_change:
+                on_change()
+
+        combo.currentIndexChanged.connect(changed)
+        form.addRow(label, combo)
+        return combo
+
+    def _spin(self, form, label, section, key, lo, hi, suffix=""):
+        spin = QSpinBox()
+        spin.setRange(lo, hi)
+        spin.setSuffix(suffix)
+        spin.setValue(int(self.config.get(section, key)))
+        spin.valueChanged.connect(lambda v: self.config.set(section, key, int(v)))
+        form.addRow(label, spin)
+        return spin
+
+    def _note(self, form, text):
+        note = QLabel(text)
+        note.setObjectName("muted")
+        note.setWordWrap(True)
+        form.addRow(note)
 
     # ------------------------------------------------------------ pages
     def _general(self):
-        g = self._grid()
-        r = self._switch(g, 0, "Start CatCap at login (in the tray)", "general", "start_at_login",
-                         self.app.update_autostart)
-        r = self._switch(g, r, "Show a notification after each capture", "general", "notifications")
-        r = self._switch(g, r, "Play a camera sound", "general", "sound")
-        about = Gtk.Label(xalign=0, wrap=True, max_width_chars=70, margin_top=20)
-        about.set_markup(f"Settings file: <tt>{ui.GLib.markup_escape_text(str(self.config.path))}</tt>")
-        about.get_style_context().add_class("catcap-dim")
-        g.attach(about, 0, r, 2, 1)
-        return g
+        w, form = self._form()
+        self._check(form, "Start CatCap when I log in", "general", "start_at_login", self.app.update_autostart)
+        self._check(form, "Show a notification after each capture", "general", "notifications")
+        self._check(form, "Play a shutter sound", "general", "sound")
+        self._combo(form, "Appearance", "general", "theme", THEMES,
+                    lambda: self._note_restart(form))
+        self._note(form, f"Settings are stored in {self.config.path}")
+        return w
+
+    def _note_restart(self, form):
+        self.app.apply_theme()
 
     def _capture(self):
-        g = self._grid()
-        r = self._combo(g, 0, "After a capture", "capture", "after_action", AFTER_ACTIONS)
-        r = self._spin(g, r, "Default delay (seconds)", "capture", "delay", 0, 60)
-        r = self._switch(g, r, "Include the mouse pointer", "capture", "include_cursor",
-                         hint="X11 only. On Wayland the portal decides.")
-        r = self._switch(g, r, "Include window title bar and borders", "capture", "window_decorations")
-        r = self._switch(g, r, "Show magnifier while selecting", "capture", "magnifier")
-        r = self._spin(g, r, "Magnifier zoom", "capture", "magnifier_zoom", 2, 20)
-        r = self._switch(g, r, "Highlight and snap to windows while selecting", "capture", "snap_to_windows")
-        backend = self.app.backend.name
-        note = Gtk.Label(xalign=0, wrap=True, max_width_chars=70, margin_top=16)
-        note.get_style_context().add_class("catcap-dim")
-        if backend == "wayland":
-            note.set_text("Wayland session: captures go through the desktop's screenshot portal. Window and "
-                          "active-window captures use the portal's picker, region selection works on the "
-                          "primary monitor, and the source application is not recorded.")
-        else:
-            note.set_text("X11 session: all capture modes are available.")
-        g.attach(note, 0, r, 2, 1)
-        return g
+        w, form = self._form()
+        self._combo(form, "After a capture", "capture", "after_action", AFTER_ACTIONS)
+        self._spin(form, "Default delay", "capture", "delay", 0, 60, " s")
+        self._check(form, "Include the mouse pointer", "capture", "include_cursor",
+                    hint="X11 sessions only. On Wayland the screenshot portal decides.")
+        self._check(form, "Include window title bars and borders", "capture", "window_decorations")
+        self._check(form, "Show the magnifier while selecting", "capture", "magnifier")
+        self._spin(form, "Magnifier zoom", "capture", "magnifier_zoom", 2, 20, "×")
+        self._check(form, "Highlight windows under the pointer", "capture", "snap_to_windows")
+        if self.app.backend.name == "wayland":
+            self._note(form, "Wayland session: window and active-window captures use the portal's picker, "
+                             "region selection works on the primary monitor, and the source app isn't recorded.")
+        return w
 
     def _hotkeys(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(12)
         mgr = self.app.hotkeys
-        top = self._grid()
-        r = self._switch(top, 0, "Enable global hotkeys", "hotkeys", "enabled", self._apply_hotkeys)
+        top, form = self._form()
+        self._check(form, "Turn on global hotkeys", "hotkeys", "enabled", self._apply_hotkeys)
         if hotkeys.is_cinnamon():
-            r = self._switch(top, r, "Use Print Screen for CatCap", "hotkeys", "take_over_print", self._apply_hotkeys,
-                             hint="Frees Print Screen from Cinnamon's built-in screenshot tool. "
-                                  "Turning this off restores Cinnamon's keys.")
-        box.add(top)
-        desc = Gtk.Label(label=mgr.backend_description(), xalign=0, wrap=True, max_width_chars=70)
-        desc.get_style_context().add_class("catcap-dim")
-        box.add(desc)
+            self._check(form, "Use Print Screen for CatCap", "hotkeys", "take_over_print", self._apply_hotkeys,
+                        hint="Frees Print Screen from Cinnamon's built-in screenshot tool. Turning this off, or "
+                             "turning hotkeys off, gives the keys back to Cinnamon.")
+        lay.addWidget(top)
+        desc = QLabel(mgr.backend_description())
+        desc.setObjectName("muted")
+        desc.setWordWrap(True)
+        lay.addWidget(desc)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(8)
+        for col, head in enumerate(("Action", "Shortcut", "", "Command")):
+            h = QLabel(head)
+            h.setObjectName("muted")
+            grid.addWidget(h, 0, col)
+        for row, (action, label, flag) in enumerate(hotkeys.ACTIONS, start=1):
+            grid.addWidget(QLabel(label), row, 0)
+            edit = QKeySequenceEdit(QKeySequence(hotkeys.gtk_to_qt(self.config.get("hotkeys", action))))
+            edit.setMaximumSequenceLength(1) if hasattr(edit, "setMaximumSequenceLength") else None
+            edit.editingFinished.connect(lambda e=edit, a=action: self._set_key(a, e))
+            grid.addWidget(edit, row, 1)
+            clear = QToolButton()
+            clear.setProperty("flat", True)
+            clear.setIcon(self.app.theme.icon("close", size=14))
+            clear.setToolTip("No shortcut")
+            clear.clicked.connect(lambda _c=False, e=edit, a=action: (e.clear(), self._set_key(a, e)))
+            grid.addWidget(clear, row, 2)
+            cmd = QLineEdit(mgr.command(flag))
+            cmd.setReadOnly(True)
+            grid.addWidget(cmd, row, 3)
+        lay.addLayout(grid)
+        self.hk_status = QLabel()
+        self.hk_status.setWordWrap(True)
+        lay.addWidget(self.hk_status)
+        lay.addStretch(1)
+        return w
 
-        self.hk_store = Gtk.ListStore(str, str, str, str)  # action, label, accel, command
-        for action, label, flag in hotkeys.ACTIONS:
-            self.hk_store.append([action, label, self.config.get("hotkeys", action), mgr.command(flag)])
-        tree = Gtk.TreeView(model=self.hk_store)
-        tree.append_column(Gtk.TreeViewColumn("Action", Gtk.CellRendererText(), text=1))
-        accel = Gtk.CellRendererAccel(editable=True, accel_mode=Gtk.CellRendererAccelMode.OTHER)
-        accel.connect("accel-edited", self._accel_edited)
-        accel.connect("accel-cleared", self._accel_cleared)
-        col = Gtk.TreeViewColumn("Shortcut", accel)
-        col.set_cell_data_func(accel, self._accel_data)
-        tree.append_column(col)
-        cmd = Gtk.CellRendererText()
-        cmd.set_property("foreground", "gray")
-        tree.append_column(Gtk.TreeViewColumn("Command", cmd, text=3))
-        frame = Gtk.Frame()
-        frame.add(tree)
-        box.add(frame)
-        hint = Gtk.Label(label="Click a shortcut to change it; Backspace clears it.", xalign=0)
-        hint.get_style_context().add_class("catcap-dim")
-        box.add(hint)
-        self.hk_warnings = Gtk.Label(xalign=0, wrap=True, max_width_chars=70)
-        box.add(self.hk_warnings)
-        return box
-
-    def _accel_data(self, _col, cell, model, it, _data):
-        accel = model[it][2]
-        key, mods = Gtk.accelerator_parse(accel) if accel else (0, 0)
-        cell.set_property("accel-key", key)
-        cell.set_property("accel-mods", mods)
-
-    def _accel_edited(self, _cell, path, key, mods, _hw):
-        accel = Gtk.accelerator_name(key, mods)
-        self.hk_store[path][2] = accel
-        self.config.set("hotkeys", self.hk_store[path][0], accel)
-        self._apply_hotkeys()
-
-    def _accel_cleared(self, _cell, path):
-        self.hk_store[path][2] = ""
-        self.config.set("hotkeys", self.hk_store[path][0], "")
+    def _set_key(self, action, edit):
+        seq = edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText).split(",")[0].strip()
+        self.config.set("hotkeys", action, hotkeys.qt_to_gtk(seq))
         self._apply_hotkeys()
 
     def _apply_hotkeys(self):
         warnings = self.app.hotkeys.apply()
         if warnings:
-            self.hk_warnings.set_markup("<b>Check these:</b>\n" + "\n".join(
-                ui.GLib.markup_escape_text(w) for w in warnings))
+            self.hk_status.setText("Check these:\n" + "\n".join(warnings))
         elif self.config.get("hotkeys", "enabled"):
-            self.hk_warnings.set_text("Hotkeys are active.")
+            self.hk_status.setText("Hotkeys are on.")
         else:
-            self.hk_warnings.set_text("")
+            self.hk_status.setText("")
 
     def _library(self):
-        g = self._grid()
-        g.attach(Gtk.Label(label="Image folder", xalign=0, hexpand=True), 0, 0, 1, 1)
-        chooser = Gtk.FileChooserButton(title="Choose the image folder", action=Gtk.FileChooserAction.SELECT_FOLDER)
-        chooser.set_filename(str(self.config.images_dir()))
-        chooser.connect("file-set", self._move_library)
-        g.attach(chooser, 1, 0, 1, 1)
-        r = self._spin(g, 1, "Delete items in Trash after (days, 0 = never)", "library", "trash_days", 0, 3650)
-        r = self._spin(g, r, "Thumbnail size (px, applies on reopen)", "library", "thumb_size", 96, 320)
-        note = Gtk.Label(xalign=0, wrap=True, max_width_chars=70, margin_top=16)
-        note.get_style_context().add_class("catcap-dim")
-        note.set_text("Originals are stored as PNG with a .json file holding the annotations next to each one. "
-                      "Edited images are rendered on demand and are not stored.")
-        g.attach(note, 0, r, 2, 1)
-        return g
+        w, form = self._form()
+        row = QWidget()
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(0, 0, 0, 0)
+        self.folder = QLineEdit(str(self.config.images_dir()))
+        self.folder.setReadOnly(True)
+        self.folder.setMinimumWidth(320)
+        change = QPushButton("Change…")
+        change.clicked.connect(self._move_library)
+        rl.addWidget(self.folder, 1)
+        rl.addWidget(change)
+        form.addRow("Image folder", row)
+        self._spin(form, "Empty trash items after", "library", "trash_days", 0, 3650, " days")
+        self._note(form, "Set to 0 to keep items in the trash until you empty it.")
+        self._note(form, "Each original is kept as a PNG with a small .json file next to it that holds your edits. "
+                         "Edited images are rendered when you copy, export or drag them, so they don't take extra space.")
+        return w
 
-    def _move_library(self, chooser):
-        new_dir = Path(chooser.get_filename())
-        if new_dir == self.app.library.images_dir:
+    def _move_library(self):
+        new_dir = QFileDialog.getExistingDirectory(self, "Choose the image folder", str(self.app.library.images_dir))
+        if not new_dir or Path(new_dir) == self.app.library.images_dir:
             return
-        if not ui.ask(self, "Move library?", f"Move all captures to {new_dir}?", "_Move"):
-            chooser.set_filename(str(self.app.library.images_dir))
+        if not ui.ask(self, "Move the library?", f"All captures move to {new_dir}.", "Move"):
             return
         try:
-            self.app.library.move_images(new_dir)
-            self.config.set("library", "images_dir", str(new_dir))
+            self.app.library.move_images(Path(new_dir))
+            self.config.set("library", "images_dir", new_dir)
+            self.folder.setText(new_dir)
         except Exception as exc:
-            ui.error_dialog(self, "Could not move the library", str(exc))
+            ui.error(self, "Couldn't move the library", str(exc))
 
     def _output(self):
-        g = self._grid()
-        g.attach(Gtk.Label(label="File name template", xalign=0, hexpand=True), 0, 0, 1, 1)
-        entry = Gtk.Entry(text=self.config.get("output", "filename_template"), width_chars=30)
-        entry.connect("changed", lambda e: self.config.set("output", "filename_template", e.get_text()))
-        g.attach(entry, 1, 0, 1, 1)
-        hint = Gtk.Label(xalign=0, wrap=True, max_width_chars=70)
-        hint.get_style_context().add_class("catcap-dim")
-        hint.set_text("Tokens: {app} {title} {name} {mode} {width} {height} {id}, and date patterns such as "
-                      "{yyyy-MM-dd} or {HHmmss}.")
-        g.attach(hint, 0, 1, 2, 1)
-        r = self._combo(g, 2, "Default export format", "output", "default_format", FORMATS)
-        r = self._spin(g, r, "JPG / WebP quality", "output", "jpg_quality", 10, 100)
-        return g
+        w, form = self._form()
+        name = QLineEdit(self.config.get("output", "filename_template"))
+        name.setMinimumWidth(300)
+        name.textChanged.connect(lambda t: self.config.set("output", "filename_template", t))
+        form.addRow("File names", name)
+        self._note(form, "Use {app}, {title}, {name}, {mode}, {width}, {height}, {id} and date patterns such as "
+                         "{yyyy-MM-dd} or {HHmmss}.")
+        self._combo(form, "Default format", "output", "default_format", FORMATS)
+        self._spin(form, "JPG and WebP quality", "output", "jpg_quality", 10, 100, " %")
+        return w

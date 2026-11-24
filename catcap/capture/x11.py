@@ -1,4 +1,4 @@
-"""X11 capture: root window grab, windows from libwnck, cursor from XFixes."""
+"""X11 capture: Qt screen grab, EWMH window list via python-xlib, cursor via XFixes."""
 
 from __future__ import annotations
 
@@ -6,19 +6,19 @@ import ctypes
 import ctypes.util
 import os
 
-import cairo
-import gi
+from PyQt6.QtCore import QPoint
+from PyQt6.QtGui import QCursor, QGuiApplication, QImage, QPainter
 
-gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk  # noqa: E402
-
-from . import Snapshot, WindowInfo, monitors_logical  # noqa: E402
+from . import Snapshot, WindowInfo
 
 try:
-    gi.require_version("Wnck", "3.0")
-    from gi.repository import Wnck  # noqa: E402
-except (ValueError, ImportError):  # pragma: no cover - optional
-    Wnck = None
+    from Xlib import X, display as xdisplay
+    from Xlib.error import XError
+except ImportError:  # pragma: no cover - python3-xlib is a package dependency
+    xdisplay = None
+    XError = Exception
+
+FMT = QImage.Format.Format_ARGB32_Premultiplied
 
 
 class X11Backend:
@@ -33,81 +33,116 @@ class X11Backend:
             callback(None, str(exc))
 
     def snapshot_sync(self, include_cursor: bool = False) -> Snapshot:
-        root = Gdk.get_default_root_window()
-        lw, lh = root.get_width(), root.get_height()
-        windows, active = self._windows()  # list before grabbing, overlay not shown yet
-        pixbuf = Gdk.pixbuf_get_from_window(root, 0, 0, lw, lh)
-        if pixbuf is None:
+        windows, active = list_windows()   # before any CatCap overlay exists
+        screens = QGuiApplication.screens()
+        virtual = QGuiApplication.primaryScreen().virtualGeometry()
+        scale = max(s.devicePixelRatio() for s in screens) if screens else 1.0
+        image = QImage(round(virtual.width() * scale), round(virtual.height() * scale), FMT)
+        image.fill(0)
+        painter = QPainter(image)
+        monitors = []
+        for screen in screens:
+            geo = screen.geometry()
+            pixmap = screen.grabWindow(0)
+            if pixmap.isNull():
+                continue
+            x = round((geo.x() - virtual.x()) * scale)
+            y = round((geo.y() - virtual.y()) * scale)
+            painter.drawImage(x, y, pixmap.toImage())
+            monitors.append((screen.name() or screen.model() or "Monitor", x, y,
+                             round(geo.width() * scale), round(geo.height() * scale)))
+        painter.end()
+        if not monitors:
             raise RuntimeError("could not read the screen")
-        scale = pixbuf.get_width() / lw
-        wscale = self._wnck_scale(pixbuf.get_width())
-        windows = [self._scaled(w, wscale) for w in windows]
-        active = self._scaled(active, wscale) if active else None
-        monitors = [(n, round(x * scale), round(y * scale), round(w * scale), round(h * scale))
-                    for n, x, y, w, h in monitors_logical()]
-        seat = Gdk.Display.get_default().get_default_seat()
-        _screen, px, py = seat.get_pointer().get_position()
-        pointer = (round(px * scale), round(py * scale))
+        pos: QPoint = QCursor.pos()
+        pointer = (round((pos.x() - virtual.x()) * scale), round((pos.y() - virtual.y()) * scale))
+        offset = (round(virtual.x() * scale), round(virtual.y() * scale))
+        windows = [_shift(w, offset) for w in windows]
+        active = _shift(active, offset) if active else None
         if include_cursor:
-            pixbuf = _composite_cursor(pixbuf) or pixbuf
-        return Snapshot(pixbuf=pixbuf, scale=scale, windows=windows, active=active,
-                        monitors=monitors, pointer=pointer, backend="x11")
+            composite_cursor(image, offset)
+        return Snapshot(image=image, scale=scale, origin=(virtual.x(), virtual.y()), windows=windows,
+                        active=active, monitors=monitors, pointer=pointer, backend="x11")
 
-    # ------------------------------------------------------------- windows
-    @staticmethod
-    def _wnck_scale(image_width: int) -> float:
-        if Wnck is None:
-            return 1.0
-        screen = Wnck.Screen.get_default()
-        return image_width / screen.get_width() if screen and screen.get_width() else 1.0
 
-    @staticmethod
-    def _scaled(win: WindowInfo, k: float) -> WindowInfo:
-        if abs(k - 1.0) < 1e-6:
-            return win
-        cx, cy, cw, ch = win.client
-        return WindowInfo(round(win.x * k), round(win.y * k), round(win.w * k), round(win.h * k),
-                          (round(cx * k), round(cy * k), round(cw * k), round(ch * k)), win.app, win.title)
+def _shift(win: WindowInfo, offset) -> WindowInfo:
+    ox, oy = offset
+    if not ox and not oy:
+        return win
+    cx, cy, cw, ch = win.client
+    return WindowInfo(win.x - ox, win.y - oy, win.w, win.h, (cx - ox, cy - oy, cw, ch), win.app, win.title)
 
-    def _windows(self) -> tuple[list[WindowInfo], WindowInfo | None]:
-        if Wnck is None:
-            return [], None
-        screen = Wnck.Screen.get_default()
-        if screen is None:
-            return [], None
-        screen.force_update()
-        workspace = screen.get_active_workspace()
-        skip = {Wnck.WindowType.DESKTOP}
+
+# ---------------------------------------------------------------- EWMH window list
+def list_windows() -> tuple[list[WindowInfo], WindowInfo | None]:
+    if xdisplay is None or not os.environ.get("DISPLAY"):
+        return [], None
+    try:
+        d = xdisplay.Display()
+    except Exception:
+        return [], None
+    try:
+        root = d.screen().root
+        atom = d.intern_atom
+
+        def prop(win, name, kind=X.AnyPropertyType):
+            try:
+                value = win.get_full_property(atom(name), kind)
+            except XError:
+                return None
+            return value.value if value is not None else None
+
+        stack = prop(root, "_NET_CLIENT_LIST_STACKING") or prop(root, "_NET_CLIENT_LIST") or []
+        active_id = (prop(root, "_NET_ACTIVE_WINDOW") or [0])[0]
+        current_desktop = (prop(root, "_NET_CURRENT_DESKTOP") or [0])[0]
+        hidden = atom("_NET_WM_STATE_HIDDEN")
+        skip_types = {atom("_NET_WM_WINDOW_TYPE_DESKTOP")}
         own_pid = os.getpid()
-        result: list[WindowInfo] = []
-        active_info = None
-        active = screen.get_active_window()
-        for win in reversed(screen.get_windows_stacked() or []):
-            if win.is_minimized() or win.get_window_type() in skip:
+        result, active = [], None
+        for wid in reversed(list(stack)):
+            win = d.create_resource_object("window", wid)
+            try:
+                if win.get_attributes().map_state != X.IsViewable:
+                    continue
+                if hidden in (prop(win, "_NET_WM_STATE") or []):
+                    continue
+                if skip_types & set(prop(win, "_NET_WM_WINDOW_TYPE") or []):
+                    continue
+                desk = prop(win, "_NET_WM_DESKTOP")
+                if desk is not None and desk[0] not in (current_desktop, 0xFFFFFFFF):
+                    continue
+                if (prop(win, "_NET_WM_PID") or [0])[0] == own_pid:
+                    continue
+                geom = win.get_geometry()
+                origin = root.translate_coords(win, 0, 0)
+                cx, cy, cw, ch = origin.x, origin.y, geom.width, geom.height
+                gtk = prop(win, "_GTK_FRAME_EXTENTS")
+                if gtk is not None and len(gtk) == 4:      # client-side decorations: drop the shadow
+                    left, right, top, bottom = gtk
+                    cx, cy, cw, ch = cx + left, cy + top, cw - left - right, ch - top - bottom
+                    frame = (cx, cy, cw, ch)
+                else:
+                    ext = prop(win, "_NET_FRAME_EXTENTS") or [0, 0, 0, 0]
+                    left, right, top, bottom = ext
+                    frame = (cx - left, cy - top, cw + left + right, ch + top + bottom)
+                name = prop(win, "_NET_WM_NAME", atom("UTF8_STRING"))
+                title = name.decode("utf-8", "replace") if isinstance(name, bytes) else ""
+                if not title:
+                    wm_name = win.get_wm_name()
+                    title = wm_name if isinstance(wm_name, str) else ""
+                wm_class = win.get_wm_class() or ("", "")
+                app = (wm_class[1] or wm_class[0] or "").lower()
+            except XError:
                 continue
-            if workspace is not None and not win.is_visible_on_workspace(workspace):
+            if frame[2] < 2 or frame[3] < 2:
                 continue
-            if win.get_pid() == own_pid:
-                continue
-            info = self._info(win)
-            if info.w < 2 or info.h < 2:
-                continue
+            info = WindowInfo(*frame, client=(cx, cy, cw, ch), app=app, title=title)
             result.append(info)
-            if active is not None and win.get_xid() == active.get_xid():
-                active_info = info
-        return result, active_info
-
-    @staticmethod
-    def _info(win) -> WindowInfo:
-        x, y, w, h = win.get_geometry()
-        client = tuple(win.get_client_window_geometry())
-        app = ""
-        group = win.get_class_group()
-        if group is not None:
-            app = group.get_res_class() or group.get_name() or ""
-        if not app and win.get_application() is not None:
-            app = win.get_application().get_name() or ""
-        return WindowInfo(x, y, w, h, client, app=app.lower(), title=win.get_name() or "")
+            if wid == active_id:
+                active = info
+        return result, active
+    finally:
+        d.close()
 
 
 # ---------------------------------------------------------------- cursor (XFixes)
@@ -123,8 +158,8 @@ class _XFixesCursorImage(ctypes.Structure):
     ]
 
 
-def _cursor_surface():
-    """Return (surface, x, y) of the current cursor in device pixels, or None."""
+def cursor_image():
+    """(QImage, x, y) of the current cursor in device pixels, or None."""
     try:
         xlib = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
         xfixes = ctypes.CDLL(ctypes.util.find_library("Xfixes") or "libXfixes.so.3")
@@ -140,40 +175,30 @@ def _cursor_surface():
     if not dpy:
         return None
     try:
-        img_p = xfixes.XFixesGetCursorImage(dpy)
-        if not img_p:
+        ptr = xfixes.XFixesGetCursorImage(dpy)
+        if not ptr:
             return None
-        img = img_p.contents
+        img = ptr.contents
         w, h = img.width, img.height
-        if w == 0 or h == 0:
-            xlib.XFree(img_p)
+        if not w or not h:
+            xlib.XFree(ptr)
             return None
-        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
-        stride = surface.get_stride()
-        data = surface.get_data()
-        for row in range(h):
-            for col in range(w):
-                argb = img.pixels[row * w + col] & 0xFFFFFFFF
-                offset = row * stride + col * 4
-                data[offset:offset + 4] = argb.to_bytes(4, "little")
-        surface.mark_dirty()
-        result = (surface, img.x - img.xhot, img.y - img.yhot)
-        xlib.XFree(img_p)
+        data = bytearray(w * h * 4)
+        for i in range(w * h):
+            data[i * 4:i * 4 + 4] = (img.pixels[i] & 0xFFFFFFFF).to_bytes(4, "little")
+        qimg = QImage(bytes(data), w, h, w * 4, FMT).copy()
+        result = (qimg, img.x - img.xhot, img.y - img.yhot)
+        xlib.XFree(ptr)
         return result
     finally:
         xlib.XCloseDisplay(dpy)
 
 
-def _composite_cursor(pixbuf):
-    cursor = _cursor_surface()
-    if cursor is None:
-        return None
-    from ..render import pixbuf_to_surface, surface_to_pixbuf
-
-    surface, cx, cy = cursor
-    base = pixbuf_to_surface(pixbuf)
-    ctx = cairo.Context(base)
-    ctx.set_source_surface(surface, cx, cy)
-    ctx.paint()
-    base.flush()
-    return surface_to_pixbuf(base)
+def composite_cursor(image: QImage, offset=(0, 0)) -> None:
+    cur = cursor_image()
+    if cur is None:
+        return
+    qimg, x, y = cur
+    painter = QPainter(image)
+    painter.drawImage(x - offset[0], y - offset[1], qimg)
+    painter.end()

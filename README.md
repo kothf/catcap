@@ -9,7 +9,7 @@ Works on X11 and Wayland.
 ## Try it from this folder
 
 ```bash
-./install-deps.sh      # once: installs the GTK/Python packages CatCap needs
+./install-deps.sh      # once: installs PyQt6 and the other packages CatCap needs
 ./run-catcap           # opens the library and puts CatCap in the tray
 ```
 
@@ -31,7 +31,7 @@ also work in the Wayland session.
 
 ```bash
 ./packaging/build-deb.sh                          # creates dist/catcap_<version>_all.deb
-sudo apt install ./dist/catcap_0.1.0_all.deb      # then start “CatCap” from the Mint menu
+sudo apt install ./dist/catcap_0.2.0_all.deb      # then start “CatCap” from the Mint menu
 ```
 
 GitHub Actions also builds the package on every push (download it from the run's
@@ -58,9 +58,12 @@ python3 -m unittest discover -s tests -v                 # core tests
 dbus-run-session -- python3 -m unittest discover -s tests  # also runs the Wayland portal tests
 ```
 
-Code layout: `catcap/capture/` (X11 and portal backends), `overlay.py` (region selection),
-`editor.py`, `library_window.py`, `library.py` (SQLite), `annotations.py` + `render.py`
-(non-destructive editing), `hotkeys.py`, `tray.py`, `app.py` (CLI and workflow).
+Built with Python 3 and Qt 6 (PyQt6). Code layout: `catcap/capture/` (X11 and portal backends),
+`overlay.py` (region selection), `editor.py`, `library_window.py`, `library.py` (SQLite),
+`annotations.py` + `render.py` (non-destructive editing), `theme.py` (palette, stylesheet, icons),
+`hotkeys.py`, `tray.py`, `app.py` (CLI and workflow).
+
+To give Print Screen back to Cinnamon (for example before uninstalling), run `catcap --release-hotkeys`.
 
 ## Licence
 

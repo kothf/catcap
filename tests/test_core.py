@@ -14,10 +14,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import gi  # noqa: E402
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PyQt6.QtGui import QColor, QImage, QPainter  # noqa: E402
+from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import GdkPixbuf  # noqa: E402
+APP = QApplication.instance() or QApplication([])
 
 
 class TempHome(unittest.TestCase):
@@ -36,10 +37,10 @@ class TempHome(unittest.TestCase):
                 os.environ[k] = v
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def pixbuf(self, w=400, h=300, color=0x3366CCFF):
-        pb = GdkPixbuf.Pixbuf.new(GdkPixbuf.Colorspace.RGB, True, 8, w, h)
-        pb.fill(color)
-        return pb
+    def pixbuf(self, w=400, h=300, color="#3366CC"):
+        image = QImage(w, h, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor(color))
+        return image
 
 
 class ConfigTests(TempHome):
@@ -176,33 +177,29 @@ class RenderTests(TempHome):
         from catcap import render
         from catcap.annotations import Document
 
-        src = render.pixbuf_to_surface(self.pixbuf(200, 100, 0xFFFFFFFF))
-        import cairo
-
-        ctx = cairo.Context(src)
-        ctx.set_source_rgb(0, 0, 0)
+        src = self.pixbuf(200, 100, "#FFFFFF")
+        p = QPainter(src)
         for x in range(0, 100, 4):
-            ctx.rectangle(x, 0, 2, 100)
-        ctx.fill()
+            p.fillRect(x, 0, 2, 100, QColor("black"))
+        p.end()
         doc = Document(items=[{"type": "pixelate", "x": 0, "y": 0, "w": 100, "h": 100, "strength": 20},
                               {"type": "text", "x": 120, "y": 10, "text": "Hi"}])
         out = render.render(src, doc)
-        img = render.surface_to_pil(out).convert("L")
-        stripes = {img.getpixel((x, 50)) for x in range(0, 100)}
+        stripes = {QColor(out.pixel(x, 50)).lightness() for x in range(0, 100)}
         self.assertLess(max(stripes) - min(stripes), 60, "pixelated stripes should be flattened")
         for fmt in ("png", "jpg", "webp", "bmp", "pdf"):
-            path = render.save_surface(out, self.tmp / f"x.{fmt}")
+            path = render.save_image(out, self.tmp / f"x.{fmt}")
             self.assertGreater(path.stat().st_size, 100)
 
     def test_crop_output_size(self):
         from catcap import render
         from catcap.annotations import Document
 
-        src = render.pixbuf_to_surface(self.pixbuf(400, 300))
+        src = self.pixbuf(400, 300)
         doc = Document(crop=[10, 20, 100, 50])
         doc.rotate_cw(400, 300)
         out = render.render(src, doc)
-        self.assertEqual((out.get_width(), out.get_height()), (50, 100))
+        self.assertEqual((out.width(), out.height()), (50, 100))
 
 
 class FilenameAndHotkeyTests(unittest.TestCase):
@@ -217,11 +214,14 @@ class FilenameAndHotkeyTests(unittest.TestCase):
         self.assertEqual(format_filename("{width}x{height}-{id}", cap), "10x20-abcdef12")
 
     def test_accelerator_normalisation(self):
-        from catcap.hotkeys import _norm
+        from catcap.hotkeys import _norm, gtk_to_qt, qt_to_gtk
 
         self.assertEqual(_norm("<Primary><Alt>t"), _norm("<Control><Alt>T"))
         self.assertNotEqual(_norm("<Alt>Print"), _norm("<Control><Alt>Print"))
         self.assertIsNone(_norm(""))
+        self.assertEqual(qt_to_gtk("Ctrl+Alt+Print"), "<Primary><Alt>Print")
+        self.assertEqual(gtk_to_qt("<Primary><Shift>Print"), "Ctrl+Shift+Print")
+        self.assertEqual(_norm(qt_to_gtk(gtk_to_qt("<Shift>Print"))), _norm("<Shift>Print"))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Render original + Document to pixels on demand (LIB-03), and export files."""
+"""Render original + Document to pixels on demand (LIB-03), and export files. Pure QPainter."""
 
 from __future__ import annotations
 
@@ -6,21 +6,13 @@ import math
 import os
 from pathlib import Path
 
-import cairo
-import gi
+from PyQt6.QtCore import QMarginsF, QPointF, QRectF, QSizeF, Qt
+from PyQt6.QtGui import (QColor, QFont, QFontMetricsF, QImage, QImageWriter, QPageSize, QPainter, QPainterPath,
+                         QPdfWriter, QPen)
 
-gi.require_version("Gdk", "3.0")
-gi.require_version("GdkPixbuf", "2.0")
-gi.require_version("Pango", "1.0")
-gi.require_version("PangoCairo", "1.0")
-from gi.repository import Gdk, GdkPixbuf, Pango, PangoCairo  # noqa: E402
+from .annotations import Document, EFFECT_KINDS, step_label
 
-from .annotations import Document, EFFECT_KINDS, step_label  # noqa: E402
-
-try:
-    from PIL import Image, ImageFilter
-except ImportError:  # pragma: no cover - python3-pil is a package dependency
-    Image = ImageFilter = None
+FMT = QImage.Format.Format_ARGB32_Premultiplied
 
 EXPORT_FORMATS = {
     "png": ("PNG", ".png"),
@@ -31,198 +23,143 @@ EXPORT_FORMATS = {
 }
 
 
-# ------------------------------------------------------------------ conversions
-def parse_color(spec: str, alpha: float = 1.0) -> tuple[float, float, float, float]:
-    rgba = Gdk.RGBA()
-    if not rgba.parse(spec or "#000"):
-        rgba.parse("#e53935")
-    return rgba.red, rgba.green, rgba.blue, rgba.alpha * alpha
+# ------------------------------------------------------------------ helpers
+def parse_color(spec: str, alpha: float = 1.0) -> QColor:
+    color = QColor(spec or "#e53935")
+    if not color.isValid():
+        color = QColor("#e53935")
+    color.setAlphaF(max(0.0, min(1.0, color.alphaF() * alpha)))
+    return color
 
 
-def pixbuf_to_surface(pixbuf: GdkPixbuf.Pixbuf) -> cairo.ImageSurface:
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, pixbuf.get_width(), pixbuf.get_height())
-    ctx = cairo.Context(surface)
-    Gdk.cairo_set_source_pixbuf(ctx, pixbuf, 0, 0)
-    ctx.set_operator(cairo.OPERATOR_SOURCE)
-    ctx.paint()
-    surface.flush()
-    return surface
+def load_original(path) -> QImage:
+    image = QImage(str(path))
+    if image.isNull():
+        raise ValueError(f"cannot read {path}")
+    return image.convertToFormat(FMT)
 
 
-def surface_to_pixbuf(surface: cairo.ImageSurface) -> GdkPixbuf.Pixbuf:
-    return Gdk.pixbuf_get_from_surface(surface, 0, 0, surface.get_width(), surface.get_height())
+def blank(w: int, h: int) -> QImage:
+    image = QImage(max(1, w), max(1, h), FMT)
+    image.fill(Qt.GlobalColor.transparent)
+    return image
 
 
-def surface_to_pil(surface: cairo.ImageSurface):
-    surface.flush()
-    w, h = surface.get_width(), surface.get_height()
-    data = bytes(surface.get_data())
-    return Image.frombuffer("RGBA", (w, h), data, "raw", "BGRA", surface.get_stride(), 1)
-
-
-def pil_to_surface(img) -> cairo.ImageSurface:
-    img = img.convert("RGBA")
-    w, h = img.size
-    stride = cairo.ImageSurface.format_stride_for_width(cairo.FORMAT_ARGB32, w)
-    raw = img.tobytes("raw", "BGRA", stride)
-    buf = bytearray(raw)
-    return cairo.ImageSurface.create_for_data(buf, cairo.FORMAT_ARGB32, w, h, stride)
-
-
-def load_original(path: str | Path) -> cairo.ImageSurface:
-    return pixbuf_to_surface(GdkPixbuf.Pixbuf.new_from_file(str(path)))
+def item_font(item: dict) -> QFont:
+    spec = (item.get("font") or "Sans Bold").split()
+    font = QFont()
+    styles = {"bold": QFont.Weight.Bold, "semibold": QFont.Weight.DemiBold, "medium": QFont.Weight.Medium,
+              "light": QFont.Weight.Light, "regular": QFont.Weight.Normal}
+    while spec and spec[-1].lower() in (*styles, "italic", "oblique"):
+        word = spec.pop().lower()
+        if word in ("italic", "oblique"):
+            font.setItalic(True)
+        else:
+            font.setWeight(styles[word])
+    font.setFamily(" ".join(spec) or "Sans")
+    font.setPixelSize(max(4, int(round(item.get("font_size", 22)))))
+    return font
 
 
 # ------------------------------------------------------------------ base image
-def transformed_surface(src: cairo.ImageSurface, doc: Document) -> cairo.ImageSurface:
-    ow, oh = src.get_width(), src.get_height()
+def transformed_image(src: QImage, doc: Document) -> QImage:
+    ow, oh = src.width(), src.height()
     w, h = doc.transformed_size(ow, oh)
-    if doc.rotate == 0 and not doc.flip and abs(doc.scale - 1.0) < 1e-9:
-        out = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
-        ctx = cairo.Context(out)
-        ctx.set_source_surface(src, 0, 0)
-        ctx.set_operator(cairo.OPERATOR_SOURCE)
-        ctx.paint()
-        return out
-    out = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
-    ctx = cairo.Context(out)
-    ctx.scale(doc.scale, doc.scale)
+    out = blank(w, h)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    p.scale(doc.scale, doc.scale)
     if doc.rotate == 90:
-        ctx.translate(oh, 0)
-        ctx.rotate(math.pi / 2)
+        p.translate(oh, 0)
+        p.rotate(90)
     elif doc.rotate == 180:
-        ctx.translate(ow, oh)
-        ctx.rotate(math.pi)
+        p.translate(ow, oh)
+        p.rotate(180)
     elif doc.rotate == 270:
-        ctx.translate(0, ow)
-        ctx.rotate(-math.pi / 2)
+        p.translate(0, ow)
+        p.rotate(-90)
     if doc.flip:
-        ctx.translate(ow, 0)
-        ctx.scale(-1, 1)
-    ctx.set_source_surface(src, 0, 0)
-    pattern = ctx.get_source()
-    pattern.set_filter(cairo.FILTER_GOOD if doc.scale < 1 else cairo.FILTER_BILINEAR)
-    pattern.set_extend(cairo.EXTEND_PAD)
-    ctx.set_operator(cairo.OPERATOR_SOURCE)
-    ctx.paint()
+        p.translate(ow, 0)
+        p.scale(-1, 1)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+    p.drawImage(0, 0, src)
+    p.end()
     return out
 
 
-# ------------------------------------------------------------------ items
-def _rounded_rect(ctx, x, y, w, h, r):
-    r = max(0.0, min(r, w / 2, h / 2))
-    if r <= 0:
-        ctx.rectangle(x, y, w, h)
-        return
-    ctx.new_sub_path()
-    ctx.arc(x + w - r, y + r, r, -math.pi / 2, 0)
-    ctx.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
-    ctx.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
-    ctx.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
-    ctx.close_path()
-
-
-def _apply_effect(surface: cairo.ImageSurface, item: dict) -> None:
-    if Image is None:
-        return
-    sw, sh = surface.get_width(), surface.get_height()
-    x0 = max(0, int(math.floor(item["x"])))
-    y0 = max(0, int(math.floor(item["y"])))
-    x1 = min(sw, int(math.ceil(item["x"] + item["w"])))
-    y1 = min(sh, int(math.ceil(item["y"] + item["h"])))
-    if x1 - x0 < 1 or y1 - y0 < 1:
-        return
-    strength = max(2, int(item.get("strength", 12)))
-    region = surface_to_pil(surface).crop((x0, y0, x1, y1))
-    if item["type"] == "pixelate":
-        small = region.resize((max(1, (x1 - x0) // strength), max(1, (y1 - y0) // strength)), Image.BILINEAR)
-        region = small.resize((x1 - x0, y1 - y0), Image.NEAREST)
-    else:
-        # Downscale first so blurred text cannot be recovered, then blur.
-        small = region.resize((max(1, (x1 - x0) // 4), max(1, (y1 - y0) // 4)), Image.BILINEAR)
-        region = small.resize((x1 - x0, y1 - y0), Image.BILINEAR).filter(ImageFilter.GaussianBlur(strength))
-    patch = pil_to_surface(region)
-    ctx = cairo.Context(surface)
-    ctx.set_operator(cairo.OPERATOR_SOURCE)
-    ctx.set_source_surface(patch, x0, y0)
-    ctx.rectangle(x0, y0, x1 - x0, y1 - y0)
-    ctx.fill()
-    surface.flush()
-
-
-def _text_layout(ctx, item: dict):
-    layout = PangoCairo.create_layout(ctx)
-    desc = Pango.FontDescription.from_string(item.get("font", "Sans Bold"))
-    desc.set_absolute_size(max(4.0, item.get("font_size", 22)) * Pango.SCALE)
-    layout.set_font_description(desc)
-    layout.set_text(item.get("text", ""), -1)
-    return layout
-
-
-def measure_text(item: dict) -> tuple[float, float]:
-    """Size of a text/callout box including padding; stored on the item."""
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1)
-    ctx = cairo.Context(surface)
-    layout = _text_layout(ctx, item)
-    _ink, logical = layout.get_pixel_extents()
-    pad = _box_padding(item)
-    w, h = logical.width + 2 * pad, logical.height + 2 * pad
-    item["w"], item["h"] = float(w), float(h)
-    return w, h
-
-
+# ------------------------------------------------------------------ text boxes
 def _box_padding(item: dict) -> float:
     if item["type"] == "callout" or item.get("bg"):
         return max(6.0, item.get("font_size", 22) * 0.4)
     return 2.0
 
 
-def _draw_box(ctx, item: dict, color_override=None) -> None:
-    measure_text(item)
-    x, y, w, h = item["x"], item["y"], item["w"], item["h"]
-    fg = color_override or parse_color(item.get("color", "#e53935"), item.get("opacity", 1.0))
-    is_callout = item["type"] == "callout"
-    if is_callout or item.get("bg"):
-        bg = color_override or parse_color(item.get("bg_color", "#ffffff"), item.get("opacity", 1.0))
-        radius = min(12.0, h / 3)
+def _text_rect(item: dict) -> QRectF:
+    fm = QFontMetricsF(item_font(item))
+    return fm.boundingRect(QRectF(0, 0, 100000, 100000), int(Qt.AlignmentFlag.AlignLeft), item.get("text", "") or " ")
 
-        def bubble():
-            _rounded_rect(ctx, x, y, w, h, radius)
 
-        def tail():
-            tx, ty = item["tail"]
-            cx, cy = x + w / 2, y + h / 2
-            ang = math.atan2(ty - cy, tx - cx)
-            base = min(w, h) * 0.22
-            ctx.move_to(cx + math.cos(ang + math.pi / 2) * base, cy + math.sin(ang + math.pi / 2) * base)
-            ctx.line_to(tx, ty)
-            ctx.line_to(cx + math.cos(ang - math.pi / 2) * base, cy + math.sin(ang - math.pi / 2) * base)
-            ctx.close_path()
-
-        shapes = [bubble] + ([tail] if is_callout and item.get("tail") else [])
-        if is_callout:
-            ctx.set_source_rgba(*fg)
-            ctx.set_line_width(2 * max(1.5, item.get("width", 3) / 1.5))
-            for shape in shapes:
-                shape()
-                ctx.stroke()
-        ctx.set_source_rgba(*bg)
-        for shape in shapes:
-            shape()
-            ctx.fill()
-    if color_override and (is_callout or item.get("bg")):
-        return
+def measure_text(item: dict) -> tuple[float, float]:
+    rect = _text_rect(item)
     pad = _box_padding(item)
-    layout = _text_layout(ctx, item)
-    ctx.move_to(x + pad, y + pad)
-    text_color = fg
-    if is_callout and not color_override:
-        text_color = parse_color(item.get("text_color", item.get("color", "#e53935")), item.get("opacity", 1.0))
-    ctx.set_source_rgba(*text_color)
-    PangoCairo.show_layout(ctx, layout)
+    item["w"], item["h"] = float(rect.width() + 2 * pad), float(rect.height() + 2 * pad)
+    return item["w"], item["h"]
 
 
-def _draw_arrow(ctx, item: dict, rgba) -> None:
+def _rounded(rect: QRectF, r: float) -> QPainterPath:
+    path = QPainterPath()
+    path.addRoundedRect(rect, r, r)
+    return path
+
+
+def _draw_box(p: QPainter, item: dict, override: QColor | None) -> None:
+    measure_text(item)
+    rect = QRectF(item["x"], item["y"], item["w"], item["h"])
+    fg = override or parse_color(item.get("color"), item.get("opacity", 1.0))
+    callout = item["type"] == "callout"
+    if callout or item.get("bg"):
+        bg = override or parse_color(item.get("bg_color", "#ffffff"), item.get("opacity", 1.0))
+        shapes = [_rounded(rect, min(12.0, rect.height() / 3))]
+        if callout and item.get("tail"):
+            tx, ty = item["tail"]
+            c = rect.center()
+            ang = math.atan2(ty - c.y(), tx - c.x())
+            base = min(rect.width(), rect.height()) * 0.22
+            tail = QPainterPath(QPointF(c.x() + math.cos(ang + math.pi / 2) * base,
+                                        c.y() + math.sin(ang + math.pi / 2) * base))
+            tail.lineTo(tx, ty)
+            tail.lineTo(c.x() + math.cos(ang - math.pi / 2) * base, c.y() + math.sin(ang - math.pi / 2) * base)
+            tail.closeSubpath()
+            shapes.append(tail)
+        if callout:
+            pen = QPen(fg, 2 * max(1.5, item.get("width", 3) / 1.5))
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for shape in shapes:
+                p.drawPath(shape)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(bg)
+        for shape in shapes:
+            p.drawPath(shape)
+        if override is not None:
+            return
+    pad = _box_padding(item)
+    p.setFont(item_font(item))
+    p.setPen(fg)
+    p.drawText(rect.adjusted(pad, pad, -pad + 1000, -pad + 1000), int(Qt.AlignmentFlag.AlignLeft),
+               item.get("text", ""))
+
+
+# ------------------------------------------------------------------ shapes
+def _pen(color: QColor, width: float, cap=Qt.PenCapStyle.RoundCap) -> QPen:
+    pen = QPen(color, width)
+    pen.setCapStyle(cap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    return pen
+
+
+def _draw_arrow(p: QPainter, item: dict, color: QColor) -> None:
     x1, y1, x2, y2 = item["x1"], item["y1"], item["x2"], item["y2"]
     width = item.get("width", 4)
     ang = math.atan2(y2 - y1, x2 - x1)
@@ -230,236 +167,248 @@ def _draw_arrow(ctx, item: dict, rgba) -> None:
     head = min(max(12.0, width * 4.0), length * 0.6 if length else 12.0)
     half = head * 0.5
     bx, by = x2 - math.cos(ang) * head * 0.9, y2 - math.sin(ang) * head * 0.9
-    ctx.set_source_rgba(*rgba)
-    ctx.set_line_width(width)
-    ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-    ctx.move_to(x1, y1)
-    ctx.line_to(bx, by)
-    ctx.stroke()
-    ctx.move_to(x2, y2)
-    ctx.line_to(x2 - math.cos(ang) * head + math.sin(ang) * half, y2 - math.sin(ang) * head - math.cos(ang) * half)
-    ctx.line_to(x2 - math.cos(ang) * head - math.sin(ang) * half, y2 - math.sin(ang) * head + math.cos(ang) * half)
-    ctx.close_path()
-    ctx.fill()
+    p.setPen(_pen(color, width))
+    p.drawLine(QPointF(x1, y1), QPointF(bx, by))
+    tri = QPainterPath(QPointF(x2, y2))
+    tri.lineTo(x2 - math.cos(ang) * head + math.sin(ang) * half, y2 - math.sin(ang) * head - math.cos(ang) * half)
+    tri.lineTo(x2 - math.cos(ang) * head - math.sin(ang) * half, y2 - math.sin(ang) * head + math.cos(ang) * half)
+    tri.closeSubpath()
+    p.setPen(_pen(color, max(1.0, width * 0.4)))
+    p.setBrush(color)
+    p.drawPath(tri)
 
 
-def draw_item(ctx, item: dict, color_override=None) -> None:
-    """Draw one non-effect item (blur/pixelate/spotlight are handled in render)."""
-    kind = item["type"]
-    rgba = color_override or parse_color(item.get("color", "#e53935"), item.get("opacity", 1.0))
-    width = item.get("width", 4)
-    ctx.save()
-    ctx.set_line_join(cairo.LINE_JOIN_ROUND)
-    if kind == "arrow":
-        _draw_arrow(ctx, item, rgba)
-    elif kind == "line":
-        ctx.set_source_rgba(*rgba)
-        ctx.set_line_width(width)
-        ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-        if item.get("dashed"):
-            ctx.set_dash([width * 3, width * 2])
-        ctx.move_to(item["x1"], item["y1"])
-        ctx.line_to(item["x2"], item["y2"])
-        ctx.stroke()
-    elif kind in ("rect", "ellipse"):
-        x, y, w, h = item["x"], item["y"], item["w"], item["h"]
-        if kind == "rect":
-            _rounded_rect(ctx, x, y, w, h, item.get("radius", 0))
+def _path_of(points, smooth: bool) -> QPainterPath:
+    path = QPainterPath(QPointF(*points[0]))
+    if len(points) == 1:
+        path.lineTo(points[0][0] + 0.1, points[0][1])
+    for i in range(1, len(points)):
+        if smooth and i + 1 < len(points):
+            mx, my = (points[i][0] + points[i + 1][0]) / 2, (points[i][1] + points[i + 1][1]) / 2
+            path.quadTo(QPointF(*points[i]), QPointF(mx, my))
         else:
-            ctx.save()
-            ctx.translate(x + w / 2, y + h / 2)
-            ctx.scale(max(w, 0.5) / 2, max(h, 0.5) / 2)
-            ctx.arc(0, 0, 1, 0, 2 * math.pi)
-            ctx.restore()
+            path.lineTo(QPointF(*points[i]))
+    return path
+
+
+def draw_item(p: QPainter, item: dict, override: QColor | None = None) -> None:
+    """Draw one non-effect item (blur/pixelate/spotlight are handled by draw_items)."""
+    kind = item["type"]
+    color = override or parse_color(item.get("color"), item.get("opacity", 1.0))
+    width = item.get("width", 4)
+    p.save()
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    if kind == "arrow":
+        _draw_arrow(p, item, color)
+    elif kind == "line":
+        pen = _pen(color, width)
+        if item.get("dashed"):
+            pen.setDashPattern([3, 2])
+        p.setPen(pen)
+        p.drawLine(QPointF(item["x1"], item["y1"]), QPointF(item["x2"], item["y2"]))
+    elif kind in ("rect", "ellipse"):
+        rect = QRectF(item["x"], item["y"], item["w"], item["h"])
         if item.get("fill"):
-            fill = color_override or parse_color(item.get("fill_color", item.get("color")), item.get("opacity", 1.0))
-            ctx.set_source_rgba(*fill)
-            ctx.fill_preserve()
-        ctx.set_source_rgba(*rgba)
-        ctx.set_line_width(width)
-        ctx.stroke()
+            p.setBrush(override or parse_color(item.get("fill_color", item.get("color")), item.get("opacity", 1.0)))
+        p.setPen(_pen(color, width))
+        if kind == "rect":
+            r = min(item.get("radius", 0), rect.width() / 2, rect.height() / 2)
+            p.drawRoundedRect(rect, r, r)
+        else:
+            p.drawEllipse(rect)
     elif kind in ("pen", "highlighter"):
         pts = item["points"]
         if pts:
-            if kind == "highlighter" and not color_override:
-                ctx.set_operator(cairo.OPERATOR_MULTIPLY)
-                ctx.set_line_cap(cairo.LINE_CAP_SQUARE)
+            if kind == "highlighter" and override is None:
+                p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Multiply)
+                p.setPen(_pen(color, width, Qt.PenCapStyle.SquareCap))
             else:
-                ctx.set_line_cap(cairo.LINE_CAP_ROUND)
-            ctx.set_source_rgba(*rgba)
-            ctx.set_line_width(width)
-            ctx.move_to(*pts[0])
-            if len(pts) == 1:
-                ctx.line_to(pts[0][0] + 0.1, pts[0][1])
-            for i in range(1, len(pts)):
-                if i + 1 < len(pts) and kind == "pen":
-                    mx, my = (pts[i][0] + pts[i + 1][0]) / 2, (pts[i][1] + pts[i + 1][1]) / 2
-                    ctx.curve_to(pts[i][0], pts[i][1], pts[i][0], pts[i][1], mx, my)
-                else:
-                    ctx.line_to(*pts[i])
-            ctx.stroke()
+                p.setPen(_pen(color, width))
+            p.drawPath(_path_of(pts, kind == "pen"))
     elif kind in ("text", "callout"):
-        _draw_box(ctx, item, color_override)
+        _draw_box(p, item, override)
     elif kind == "step":
         r = item.get("size", 32) / 2
-        ctx.arc(item["x"], item["y"], r, 0, 2 * math.pi)
-        ctx.set_source_rgba(*rgba)
-        ctx.fill()
-        if not color_override:
-            ctx.arc(item["x"], item["y"], r, 0, 2 * math.pi)
-            ctx.set_source_rgba(1, 1, 1, 0.9 * item.get("opacity", 1.0))
-            ctx.set_line_width(max(1.5, r * 0.12))
-            ctx.stroke()
-            layout = PangoCairo.create_layout(ctx)
-            desc = Pango.FontDescription.from_string("Sans Bold")
+        center = QPointF(item["x"], item["y"])
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(color)
+        p.drawEllipse(center, r, r)
+        if override is None:
+            p.setPen(QPen(QColor(255, 255, 255, int(230 * item.get("opacity", 1.0))), max(1.5, r * 0.12)))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(center, r, r)
             label = step_label(item.get("n", 1), item.get("style", "number"))
-            desc.set_absolute_size(r * (1.1 if len(label) < 2 else 0.85) * Pango.SCALE)
-            layout.set_font_description(desc)
-            layout.set_text(label, -1)
-            _ink, logical = layout.get_pixel_extents()
-            ctx.move_to(item["x"] - logical.width / 2, item["y"] - logical.height / 2)
-            ctx.set_source_rgba(1, 1, 1, item.get("opacity", 1.0))
-            PangoCairo.show_layout(ctx, layout)
-    ctx.restore()
+            font = QFont()
+            font.setBold(True)
+            font.setPixelSize(max(6, int(r * (1.1 if len(label) < 2 else 0.85))))
+            p.setFont(font)
+            p.setPen(QColor(255, 255, 255))
+            p.drawText(QRectF(center.x() - r, center.y() - r, 2 * r, 2 * r), int(Qt.AlignmentFlag.AlignCenter), label)
+    p.restore()
 
 
-def _draw_with_shadow(ctx, item: dict) -> None:
-    if item.get("shadow") and item["type"] not in ("highlighter",):
-        ctx.save()
-        offset = max(2.0, item.get("width", 4) * 0.6)
-        ctx.translate(offset, offset)
-        draw_item(ctx, item, color_override=(0, 0, 0, 0.35))
-        ctx.restore()
-    draw_item(ctx, item)
+def _draw_with_shadow(p: QPainter, item: dict) -> None:
+    if item.get("shadow") and item["type"] != "highlighter":
+        p.save()
+        off = max(2.0, item.get("width", 4) * 0.6)
+        p.translate(off, off)
+        draw_item(p, item, QColor(0, 0, 0, 90))
+        p.restore()
+    draw_item(p, item)
 
 
-def _draw_spotlights(surface, items) -> None:
-    ctx = cairo.Context(surface)
-    ctx.set_fill_rule(cairo.FILL_RULE_EVEN_ODD)
-    ctx.rectangle(0, 0, surface.get_width(), surface.get_height())
-    for s in items:
+def _apply_effect(image: QImage, item: dict) -> None:
+    x0 = max(0, int(math.floor(item["x"])))
+    y0 = max(0, int(math.floor(item["y"])))
+    x1 = min(image.width(), int(math.ceil(item["x"] + item["w"])))
+    y1 = min(image.height(), int(math.ceil(item["y"] + item["h"])))
+    w, h = x1 - x0, y1 - y0
+    if w < 1 or h < 1:
+        return
+    strength = max(2, int(item.get("strength", 12)))
+    region = image.copy(x0, y0, w, h)
+    if item["type"] == "pixelate":
+        small = region.scaled(max(1, w // strength), max(1, h // strength), Qt.AspectRatioMode.IgnoreAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+        region = small.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
+    else:
+        # Shrink hard (destroys detail, so text cannot be recovered), then blow up smoothly twice.
+        factor = max(3, strength)
+        small = region.scaled(max(1, w // factor), max(1, h // factor), Qt.AspectRatioMode.IgnoreAspectRatio,
+                              Qt.TransformationMode.SmoothTransformation)
+        mid = small.scaled(max(1, w // 2), max(1, h // 2), Qt.AspectRatioMode.IgnoreAspectRatio,
+                           Qt.TransformationMode.SmoothTransformation)
+        region = mid.scaled(w, h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    p = QPainter(image)
+    p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Source)
+    p.drawImage(x0, y0, region)
+    p.end()
+
+
+def _draw_spotlights(image: QImage, spots: list) -> None:
+    path = QPainterPath()
+    path.setFillRule(Qt.FillRule.OddEvenFill)
+    path.addRect(QRectF(0, 0, image.width(), image.height()))
+    for s in spots:
+        rect = QRectF(s["x"], s["y"], s["w"], s["h"])
         if s.get("shape") == "ellipse":
-            ctx.save()
-            ctx.translate(s["x"] + s["w"] / 2, s["y"] + s["h"] / 2)
-            ctx.scale(max(s["w"], 0.5) / 2, max(s["h"], 0.5) / 2)
-            ctx.arc(0, 0, 1, 0, 2 * math.pi)
-            ctx.restore()
+            path.addEllipse(rect)
         else:
-            ctx.rectangle(s["x"], s["y"], s["w"], s["h"])
-    ctx.set_source_rgba(0, 0, 0, items[0].get("dim", 0.55))
-    ctx.fill()
+            path.addRect(rect)
+    p = QPainter(image)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.fillPath(path, QColor(0, 0, 0, int(255 * spots[0].get("dim", 0.55))))
+    p.end()
 
 
-def draw_items(surface: cairo.ImageSurface, items: list) -> None:
-    """Effects first (blur/pixelate), then the spotlight dim, then drawn items,
-    so obfuscation always applies to the screenshot and annotations stay bright."""
+def draw_items(image: QImage, items: list) -> None:
+    """Effects first, then the spotlight dim, then drawn items, so obfuscation always hits the
+    screenshot and annotations stay bright."""
     for item in items:
         if item["type"] in EFFECT_KINDS:
-            _apply_effect(surface, item)
-    spotlights = [i for i in items if i["type"] == "spotlight"]
-    if spotlights:
-        _draw_spotlights(surface, spotlights)
+            _apply_effect(image, item)
+    spots = [i for i in items if i["type"] == "spotlight"]
+    if spots:
+        _draw_spotlights(image, spots)
+    p = QPainter(image)
     for item in items:
         if item["type"] in EFFECT_KINDS or item["type"] == "spotlight":
             continue
-        ctx = cairo.Context(surface)
-        _draw_with_shadow(ctx, item)
-    surface.flush()
+        _draw_with_shadow(p, item)
+    p.end()
 
 
-def render(src: cairo.ImageSurface, doc: Document, *, crop: bool = True, items=None) -> cairo.ImageSurface:
-    """Flatten original + document. `items` overrides doc.items (editor previews)."""
-    out = transformed_surface(src, doc)
+def render(src: QImage, doc: Document, *, crop: bool = True, items=None) -> QImage:
+    out = transformed_image(src, doc)
     draw_items(out, doc.items if items is None else items)
     if crop and doc.crop:
-        x, y, w, h = doc.crop
-        cw, ch = max(1, round(w)), max(1, round(h))
-        cropped = cairo.ImageSurface(cairo.FORMAT_ARGB32, cw, ch)
-        ctx = cairo.Context(cropped)
-        ctx.set_source_surface(out, -round(x), -round(y))
-        ctx.paint()
-        return cropped
+        x, y, w, h = [round(v) for v in doc.crop]
+        return out.copy(x, y, max(1, w), max(1, h))
     return out
 
 
-def render_capture(library, capture_id: str) -> cairo.ImageSurface:
-    src = load_original(library.original_path(capture_id))
-    return render(src, library.load_doc(capture_id))
+def render_capture(library, capture_id: str) -> QImage:
+    return render(load_original(library.original_path(capture_id)), library.load_doc(capture_id))
 
 
-def render_thumbnail(library, capture_id: str, size: int = 160) -> GdkPixbuf.Pixbuf:
+def scale_to_fit(image: QImage, max_w: int, max_h: int, upscale: bool = False) -> QImage:
+    if not upscale and image.width() <= max_w and image.height() <= max_h:
+        return image
+    return image.scaled(max_w, max_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+
+
+def render_thumbnail(library, capture_id: str, size: int = 200) -> QImage:
     """Load or build the cached thumbnail (with annotations)."""
     thumb = library.thumb_path(capture_id)
     original = library.original_path(capture_id)
     doc_file = library.doc_path(capture_id)
     try:
-        t_mtime = thumb.stat().st_mtime
         newest = max(original.stat().st_mtime, doc_file.stat().st_mtime if doc_file.exists() else 0)
-        if t_mtime >= newest:
-            pb = GdkPixbuf.Pixbuf.new_from_file(str(thumb))
-            if max(pb.get_width(), pb.get_height()) == size or (
-                    pb.get_width() < size and pb.get_height() < size):
-                return pb
-    except (FileNotFoundError, gi.repository.GLib.Error):
+        if thumb.stat().st_mtime >= newest:
+            img = QImage(str(thumb))
+            if not img.isNull() and (max(img.width(), img.height()) == size
+                                     or (img.width() < size and img.height() < size)):
+                return img
+    except FileNotFoundError:
         pass
     doc = library.load_doc(capture_id)
     if doc.is_empty():
-        pb = GdkPixbuf.Pixbuf.new_from_file_at_size(str(original), size, size)
+        img = scale_to_fit(load_original(original), size, size)
     else:
-        pb = scale_to_fit(surface_to_pixbuf(render_capture(library, capture_id)), size, size)
-    try:
-        pb.savev(str(thumb), "png", [], [])
+        img = scale_to_fit(render_capture(library, capture_id), size, size)
+    if img.save(str(thumb), "PNG"):
         os.chmod(thumb, 0o600)
-    except Exception:
-        pass
-    return pb
-
-
-def scale_to_fit(pixbuf: GdkPixbuf.Pixbuf, max_w: int, max_h: int, upscale: bool = False) -> GdkPixbuf.Pixbuf:
-    w, h = pixbuf.get_width(), pixbuf.get_height()
-    k = min(max_w / w, max_h / h)
-    if k >= 1 and not upscale:
-        return pixbuf
-    return pixbuf.scale_simple(max(1, int(w * k)), max(1, int(h * k)), GdkPixbuf.InterpType.BILINEAR)
+    return img
 
 
 # ------------------------------------------------------------------ export
-def save_surface(surface: cairo.ImageSurface, path: str | Path, fmt: str | None = None, quality: int = 90) -> Path:
+def supported_formats() -> list[str]:
+    have = {bytes(f).decode().lower() for f in QImageWriter.supportedImageFormats()}
+    return [k for k in EXPORT_FORMATS if k == "pdf" or k in have or (k == "jpg" and "jpeg" in have)]
+
+
+def save_image(image: QImage, path, fmt: str | None = None, quality: int = 90) -> Path:
     path = Path(path)
     fmt = (fmt or path.suffix.lstrip(".") or "png").lower()
-    if fmt == "jpeg":
-        fmt = "jpg"
+    fmt = "jpg" if fmt == "jpeg" else fmt
     if fmt not in EXPORT_FORMATS:
         raise ValueError(f"unsupported format: {fmt}")
-    if fmt == "png":
-        surface.write_to_png(str(path))
-    elif fmt == "pdf":
-        save_pdf([surface], path)
-    else:
-        img = surface_to_pil(surface)
-        if fmt in ("jpg", "bmp"):
-            background = Image.new("RGB", img.size, (255, 255, 255))
-            background.paste(img, mask=img.split()[3])
-            img = background
-        kwargs = {"quality": int(quality)} if fmt in ("jpg", "webp") else {}
-        img.save(str(path), EXPORT_FORMATS[fmt][0], **kwargs)
+    if fmt == "pdf":
+        return save_pdf([image], path)
+    if fmt not in supported_formats():
+        raise ValueError(f"{fmt.upper()} export needs the Qt image format plugins (qt6-image-formats-plugins)")
+    out = image
+    if fmt in ("jpg", "bmp"):
+        out = QImage(image.size(), QImage.Format.Format_RGB32)
+        out.fill(QColor("white"))
+        p = QPainter(out)
+        p.drawImage(0, 0, image)
+        p.end()
+    if not out.save(str(path), EXPORT_FORMATS[fmt][0].upper() if fmt != "jpg" else "JPEG",
+                    int(quality) if fmt in ("jpg", "webp") else -1):
+        raise OSError(f"could not write {path}")
     return path
 
 
-def save_pdf(surfaces, path: str | Path) -> Path:
+def save_pdf(images, path) -> Path:
     """One page per image, page size = image size at 96 dpi (OUT-03)."""
     path = Path(path)
-    first = surfaces[0]
-    k = 72.0 / 96.0
-    pdf = cairo.PDFSurface(str(path), first.get_width() * k, first.get_height() * k)
-    ctx = cairo.Context(pdf)
-    for surface in surfaces:
-        pdf.set_size(surface.get_width() * k, surface.get_height() * k)
-        ctx.save()
-        ctx.scale(k, k)
-        ctx.set_source_surface(surface, 0, 0)
-        ctx.paint()
-        ctx.restore()
-        ctx.show_page()
-    pdf.finish()
+    writer = QPdfWriter(str(path))
+    writer.setResolution(96)
+    writer.setCreator("CatCap")
+    painter = None
+    for i, image in enumerate(images):
+        size = QPageSize(QSizeF(image.width() * 72 / 96, image.height() * 72 / 96), QPageSize.Unit.Point)
+        writer.setPageSize(size)
+        writer.setPageMargins(QMarginsF(0, 0, 0, 0))
+        if painter is None:
+            painter = QPainter(writer)
+        else:
+            writer.newPage()
+        target = painter.viewport()
+        painter.drawImage(QRectF(0, 0, target.width(), target.height()), image)
+    if painter is not None:
+        painter.end()
     return path

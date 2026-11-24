@@ -159,15 +159,16 @@ class Library:
         return paths.thumbs_dir() / f"{capture_id}.png"
 
     # ------------------------------------------------------------------ create
-    def add_capture(self, pixbuf, *, mode: str = "", app: str = "", title: str = "",
+    def add_capture(self, image, *, mode: str = "", app: str = "", title: str = "",
                     monitor: str = "", name: str = "", created: float | None = None) -> str:
-        """Store a GdkPixbuf as a new capture and return its id."""
+        """Store a QImage as a new capture and return its id."""
         created = created or time.time()
         cid = uuid.uuid4().hex
         rel = self._new_relpath(created, cid)
         full = self.images_dir / rel
         paths.ensure_dir(full.parent)
-        pixbuf.savev(str(full), "png", [], [])
+        if not image.save(str(full), "PNG"):
+            raise OSError(f"could not write {full}")
         os.chmod(full, 0o600)
         if not name:
             name = (app or mode or "Capture").strip() or "Capture"
@@ -175,7 +176,7 @@ class Library:
         self.db.execute(
             "INSERT INTO captures(id, name, created, modified, mode, width, height, size, app,"
             " title, monitor, path) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-            (cid, name, created, created, mode, pixbuf.get_width(), pixbuf.get_height(),
+            (cid, name, created, created, mode, image.width(), image.height(),
              full.stat().st_size, app, title, monitor, rel),
         )
         self.db.commit()
@@ -183,13 +184,10 @@ class Library:
         return cid
 
     def import_file(self, path: str | Path) -> str:
-        from gi.repository import GdkPixbuf
-
         path = Path(path)
-        pixbuf = GdkPixbuf.Pixbuf.new_from_file(str(path))
-        pixbuf = pixbuf.apply_embedded_orientation() or pixbuf
+        image = read_image(path)
         created = path.stat().st_mtime
-        return self.add_capture(pixbuf, mode="import", name=path.stem, created=created)
+        return self.add_capture(image, mode="import", name=path.stem, created=created)
 
     def _new_relpath(self, created: float, cid: str) -> str:
         t = time.localtime(created)
@@ -473,26 +471,20 @@ class Library:
         self._emit("edited", [capture_id])
 
     def _original_size(self, capture_id: str) -> tuple[int, int]:
-        from gi.repository import GdkPixbuf
-
-        _fmt, w, h = GdkPixbuf.Pixbuf.get_file_info(str(self.original_path(capture_id)))
-        return w, h
+        return image_size(self.original_path(capture_id))
 
     # ------------------------------------------------------------------ maintenance
     def rebuild(self) -> int:
         """Re-add originals found on disk that are missing from the database (LIB-05)."""
-        from gi.repository import GdkPixbuf
-
         known = {r[0] for r in self.db.execute("SELECT path FROM captures")}
         added = 0
         for png in sorted(self.images_dir.rglob("*.png")):
             rel = png.relative_to(self.images_dir).as_posix()
             if rel in known:
                 continue
-            info = GdkPixbuf.Pixbuf.get_file_info(str(png))
-            if info is None or info[0] is None:
+            w, h = image_size(png)
+            if w <= 0 or h <= 0:
                 continue
-            _fmt, w, h = info
             cid = uuid.uuid4().hex
             created = png.stat().st_mtime
             self.db.execute(
@@ -520,6 +512,24 @@ class Library:
 
     def close(self) -> None:
         self.db.close()
+
+
+def read_image(path):
+    from PyQt6.QtGui import QImageReader
+
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)
+    image = reader.read()
+    if image.isNull():
+        raise ValueError(f"{path}: {reader.errorString()}")
+    return image
+
+
+def image_size(path) -> tuple[int, int]:
+    from PyQt6.QtGui import QImageReader
+
+    size = QImageReader(str(path)).size()
+    return size.width(), size.height()
 
 
 def export_metadata(cap: Capture) -> str:

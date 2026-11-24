@@ -1,7 +1,7 @@
 """Screen capture backends.
 
-X11:     direct root-window grab, window list via libwnck, cursor via XFixes.
-Wayland: org.freedesktop.portal.Screenshot (xdg-desktop-portal).
+X11:     Qt screen grab, window list via python-xlib (EWMH), cursor via XFixes.
+Wayland: org.freedesktop.portal.Screenshot (xdg-desktop-portal) over Qt D-Bus.
 """
 
 from __future__ import annotations
@@ -9,11 +9,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-import gi
-
-gi.require_version("Gdk", "3.0")
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf  # noqa: E402
+from PyQt6.QtGui import QGuiApplication, QImage
 
 
 @dataclass
@@ -35,8 +31,9 @@ class WindowInfo:
 
 @dataclass
 class Snapshot:
-    pixbuf: GdkPixbuf.Pixbuf
+    image: QImage
     scale: float = 1.0                      # image pixels per logical pixel
+    origin: tuple[int, int] = (0, 0)        # logical position of image (0, 0)
     windows: list = field(default_factory=list)   # WindowInfo, topmost first
     active: WindowInfo | None = None
     monitors: list = field(default_factory=list)  # (name, x, y, w, h) image px
@@ -56,31 +53,22 @@ class Snapshot:
                 return mon
         return self.monitors[0] if self.monitors else None
 
-    def crop(self, x: int, y: int, w: int, h: int) -> GdkPixbuf.Pixbuf:
-        pw, ph = self.pixbuf.get_width(), self.pixbuf.get_height()
+    def crop(self, x: int, y: int, w: int, h: int) -> QImage:
+        iw, ih = self.image.width(), self.image.height()
         x, y = max(0, int(x)), max(0, int(y))
-        w, h = min(int(w), pw - x), min(int(h), ph - y)
+        w, h = min(int(w), iw - x), min(int(h), ih - y)
         if w < 1 or h < 1:
             raise ValueError("empty capture area")
-        return self.pixbuf.new_subpixbuf(x, y, w, h).copy()
+        return self.image.copy(x, y, w, h)
 
 
 def is_wayland() -> bool:
-    display = Gdk.Display.get_default()
-    if display is not None:
-        return "Wayland" in type(display).__name__
-    return os.environ.get("XDG_SESSION_TYPE") == "wayland"
-
-
-def monitors_logical() -> list[tuple[str, int, int, int, int]]:
-    display = Gdk.Display.get_default()
-    out = []
-    for i in range(display.get_n_monitors()):
-        mon = display.get_monitor(i)
-        g = mon.get_geometry()
-        name = mon.get_model() or f"Monitor {i + 1}"
-        out.append((name, g.x, g.y, g.width, g.height))
-    return out
+    """True in a Wayland session, even when Qt itself runs through XWayland (screens of
+    other apps can then only be read through the portal)."""
+    if os.environ.get("XDG_SESSION_TYPE") == "wayland" or os.environ.get("WAYLAND_DISPLAY"):
+        return True
+    app = QGuiApplication.instance()
+    return app is not None and QGuiApplication.platformName().startswith("wayland")
 
 
 def get_backend():

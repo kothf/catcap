@@ -21,6 +21,7 @@ DEFAULTS: dict[str, dict] = {
         "notifications": True,
         "sound": False,
         "first_run_done": False,
+        "theme": "system",
     },
     "capture": {
         # editor | clipboard | library | toolbar

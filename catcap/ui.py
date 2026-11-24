@@ -1,24 +1,23 @@
-"""Shared UI helpers: clipboard, export dialog, filenames, drag-and-drop, file manager."""
+"""Shared UI helpers: clipboard, export dialogs, filenames, drag-and-drop, file manager, Open with."""
 
 from __future__ import annotations
 
+import configparser
 import os
 import re
+import shlex
 import subprocess
 import time
 from pathlib import Path
 
-import gi
+from PyQt6.QtCore import QMimeData, QUrl
+from PyQt6.QtDBus import QDBusConnection, QDBusMessage
+from PyQt6.QtGui import QDesktopServices, QGuiApplication
+from PyQt6.QtWidgets import QFileDialog, QInputDialog, QLineEdit, QMenu, QMessageBox
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+from . import paths, render
 
-from . import paths, render  # noqa: E402
-
-URI_TARGET = Gtk.TargetEntry.new("text/uri-list", 0, 0)
-IDS_TARGET = Gtk.TargetEntry.new("application/x-catcap-ids", Gtk.TargetFlags.SAME_APP, 1)
-
+IDS_MIME = "application/x-catcap-ids"
 _SAFE = re.compile(r"[^\w\-. ]+", re.UNICODE)
 
 
@@ -52,24 +51,29 @@ def format_filename(template: str, cap) -> str:
     return safe_name(re.sub(r"\{([^{}]+)\}", expand, template or "{app}_{yyyy-MM-dd}_{HHmmss}"))
 
 
-def copy_surface(surface) -> None:
-    pixbuf = render.surface_to_pixbuf(surface)
-    clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-    clipboard.set_image(pixbuf)
-    clipboard.store()
+# ------------------------------------------------------------------ clipboard / temp files
+def copy_image(image) -> None:
+    QGuiApplication.clipboard().setImage(image)
 
 
 def copy_capture(library, capture_id: str) -> None:
-    copy_surface(render.render_capture(library, capture_id))
+    copy_image(render.render_capture(library, capture_id))
 
 
 def temp_render(library, capture_id: str, config) -> Path:
     """Render to $XDG_RUNTIME_DIR/catcap for drag-and-drop / open-with / email."""
     cap = library.get(capture_id)
-    name = format_filename(config.get("output", "filename_template"), cap)
-    out = paths.runtime_dir() / f"{name}.png"
-    render.save_surface(render.render_capture(library, capture_id), out, "png")
+    out = paths.runtime_dir() / f"{format_filename(config.get('output', 'filename_template'), cap)}.png"
+    render.save_image(render.render_capture(library, capture_id), out, "png")
     return out
+
+
+def drag_mime(library, ids, config, with_ids: bool = True) -> QMimeData:
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(temp_render(library, i, config))) for i in ids])
+    if with_ids:
+        mime.setData(IDS_MIME, "\n".join(ids).encode())
+    return mime
 
 
 def cleanup_temp(max_age: float = 3600) -> None:
@@ -82,170 +86,186 @@ def cleanup_temp(max_age: float = 3600) -> None:
         pass
 
 
+# ------------------------------------------------------------------ export
 def export_dialog(parent, library, config, ids: list[str]) -> None:
-    """Export one capture (file dialog) or several (folder dialog)."""
     if not ids:
         return
     fmt = config.get("output", "default_format")
     quality = config.get("output", "jpg_quality")
     last_dir = config.get("output", "last_export_dir") or str(paths.pictures_dir())
+    template = config.get("output", "filename_template")
+    formats = render.supported_formats()
     if len(ids) == 1:
         cap = library.get(ids[0])
-        dialog = Gtk.FileChooserNative.new("Export capture", parent, Gtk.FileChooserAction.SAVE, "_Export", "_Cancel")
-        dialog.set_do_overwrite_confirmation(True)
-        dialog.set_current_folder(last_dir)
-        dialog.set_current_name(format_filename(config.get("output", "filename_template"), cap)
-                                + render.EXPORT_FORMATS.get(fmt, ("", ".png"))[1])
-        for key, (label, ext) in render.EXPORT_FORMATS.items():
-            flt = Gtk.FileFilter()
-            flt.set_name(f"{label} (*{ext})")
-            flt.add_pattern(f"*{ext}")
-            if key == "jpg":
-                flt.add_pattern("*.jpeg")
-            dialog.add_filter(flt)
-        if dialog.run() == Gtk.ResponseType.ACCEPT:
-            path = Path(dialog.get_filename())
-            ext = path.suffix.lower().lstrip(".")
-            if ext == "jpeg":
-                ext = "jpg"
-            if ext not in render.EXPORT_FORMATS:
-                path = path.with_suffix(render.EXPORT_FORMATS.get(fmt, ("", ".png"))[1])
-                ext = fmt
-            try:
-                render.save_surface(render.render_capture(library, ids[0]), path, ext, quality)
-                config.set("output", "last_export_dir", str(path.parent))
-            except Exception as exc:
-                error_dialog(parent, "Export failed", str(exc))
-        dialog.destroy()
-        return
-    dialog = Gtk.FileChooserNative.new(f"Export {len(ids)} captures to folder", parent,
-                                       Gtk.FileChooserAction.SELECT_FOLDER, "_Export", "_Cancel")
-    dialog.set_current_folder(last_dir)
-    if dialog.run() == Gtk.ResponseType.ACCEPT:
-        folder = Path(dialog.get_filename())
-        ext = render.EXPORT_FORMATS.get(fmt, ("", ".png"))[1]
+        filters = [f"{render.EXPORT_FORMATS[k][0]} (*{render.EXPORT_FORMATS[k][1]})" for k in formats]
+        default_filter = next((f for f, k in zip(filters, formats) if k == fmt), filters[0])
+        suggested = os.path.join(last_dir, format_filename(template, cap) + render.EXPORT_FORMATS.get(fmt, ("", ".png"))[1])
+        path, chosen = QFileDialog.getSaveFileName(parent, "Export capture", suggested, ";;".join(filters), default_filter)
+        if not path:
+            return
+        path = Path(path)
+        ext = path.suffix.lower().lstrip(".")
+        ext = "jpg" if ext == "jpeg" else ext
+        if ext not in render.EXPORT_FORMATS:
+            ext = formats[filters.index(chosen)] if chosen in filters else fmt
+            path = path.with_suffix(render.EXPORT_FORMATS[ext][1])
         try:
-            used = set()
-            for cid in ids:
-                cap = library.get(cid)
-                base = format_filename(config.get("output", "filename_template"), cap)
-                name, n = base, 2
-                while name in used or (folder / f"{name}{ext}").exists():
-                    name, n = f"{base}_{n}", n + 1
-                used.add(name)
-                render.save_surface(render.render_capture(library, cid), folder / f"{name}{ext}", fmt, quality)
-            config.set("output", "last_export_dir", str(folder))
+            render.save_image(render.render_capture(library, ids[0]), path, ext, quality)
+            config.set("output", "last_export_dir", str(path.parent))
         except Exception as exc:
-            error_dialog(parent, "Export failed", str(exc))
-    dialog.destroy()
+            error(parent, "Export failed", str(exc))
+        return
+    folder = QFileDialog.getExistingDirectory(parent, f"Export {len(ids)} captures to folder", last_dir)
+    if not folder:
+        return
+    folder = Path(folder)
+    ext = render.EXPORT_FORMATS.get(fmt, ("", ".png"))[1]
+    try:
+        used = set()
+        for cid in ids:
+            base = format_filename(template, library.get(cid))
+            name, n = base, 2
+            while name in used or (folder / f"{name}{ext}").exists():
+                name, n = f"{base}_{n}", n + 1
+            used.add(name)
+            render.save_image(render.render_capture(library, cid), folder / f"{name}{ext}", fmt, quality)
+        config.set("output", "last_export_dir", str(folder))
+    except Exception as exc:
+        error(parent, "Export failed", str(exc))
 
 
 def export_pdf_dialog(parent, library, config, ids: list[str]) -> None:
-    dialog = Gtk.FileChooserNative.new("Export as PDF", parent, Gtk.FileChooserAction.SAVE, "_Export", "_Cancel")
-    dialog.set_do_overwrite_confirmation(True)
-    dialog.set_current_folder(config.get("output", "last_export_dir") or str(paths.pictures_dir()))
-    dialog.set_current_name("captures.pdf" if len(ids) > 1 else
-                            format_filename(config.get("output", "filename_template"), library.get(ids[0])) + ".pdf")
-    if dialog.run() == Gtk.ResponseType.ACCEPT:
-        path = Path(dialog.get_filename()).with_suffix(".pdf")
-        try:
-            render.save_pdf([render.render_capture(library, i) for i in ids], path)
-            config.set("output", "last_export_dir", str(path.parent))
-        except Exception as exc:
-            error_dialog(parent, "Export failed", str(exc))
-    dialog.destroy()
-
-
-def show_in_folder(path: Path) -> None:
-    uri = Gio.File.new_for_path(str(path)).get_uri()
+    if not ids:
+        return
+    last_dir = config.get("output", "last_export_dir") or str(paths.pictures_dir())
+    name = "captures.pdf" if len(ids) > 1 else format_filename(config.get("output", "filename_template"),
+                                                                 library.get(ids[0])) + ".pdf"
+    path, _ = QFileDialog.getSaveFileName(parent, "Export as PDF", os.path.join(last_dir, name), "PDF (*.pdf)")
+    if not path:
+        return
+    path = Path(path).with_suffix(".pdf")
     try:
-        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
-        bus.call_sync("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
-                      "org.freedesktop.FileManager1", "ShowItems",
-                      GLib.Variant("(ass)", ([uri], "")), None, Gio.DBusCallFlags.NONE, 2000, None)
-    except GLib.Error:
-        Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(str(path.parent)).get_uri(), None)
+        render.save_pdf([render.render_capture(library, i) for i in ids], path)
+        config.set("output", "last_export_dir", str(path.parent))
+    except Exception as exc:
+        error(parent, "Export failed", str(exc))
 
 
-def open_with(parent, path: Path) -> None:
-    gfile = Gio.File.new_for_path(str(path))
-    dialog = Gtk.AppChooserDialog.new(parent, Gtk.DialogFlags.MODAL, gfile)
-    if dialog.run() == Gtk.ResponseType.OK:
-        app = dialog.get_app_info()
-        if app is not None:
-            app.launch([gfile], None)
-    dialog.destroy()
+# ------------------------------------------------------------------ desktop integration
+def show_in_folder(path: Path) -> None:
+    msg = QDBusMessage.createMethodCall("org.freedesktop.FileManager1", "/org/freedesktop/FileManager1",
+                                        "org.freedesktop.FileManager1", "ShowItems")
+    msg.setArguments([[QUrl.fromLocalFile(str(path)).toString()], ""])
+    reply = QDBusConnection.sessionBus().call(msg)
+    if reply.type() == QDBusMessage.MessageType.ErrorMessage:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+
+
+def image_apps() -> list[tuple[str, str]]:
+    """(name, Exec) of installed apps that open PNG images, for the Open with menu."""
+    dirs = [Path(p) / "applications" for p in
+            [os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))]
+            + os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")]
+    seen, apps = set(), []
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.desktop")):
+            if f.name in seen or f.name.startswith("io.github.kothf.CatCap"):
+                continue
+            seen.add(f.name)
+            cp = configparser.ConfigParser(interpolation=None, strict=False)
+            try:
+                cp.read(f, encoding="utf-8")
+                entry = cp["Desktop Entry"]
+            except (configparser.Error, KeyError, UnicodeDecodeError):
+                continue
+            if entry.get("NoDisplay", "false") == "true" or "image/png" not in entry.get("MimeType", ""):
+                continue
+            apps.append((entry.get("Name", f.stem), entry.get("Exec", "")))
+    return sorted(apps, key=lambda a: a[0].lower())
+
+
+def launch(exec_line: str, path: Path) -> None:
+    args = []
+    for token in shlex.split(exec_line):
+        if token in ("%f", "%F", "%u", "%U"):
+            args.append(str(path))
+        elif token.startswith("%"):
+            continue
+        else:
+            args.append(token)
+    if str(path) not in args:
+        args.append(str(path))
+    subprocess.Popen(args, start_new_session=True)
+
+
+def open_with_menu(parent, path_factory) -> QMenu:
+    menu = QMenu("Open with", parent)
+    apps = image_apps()
+    default = menu.addAction("Default image viewer")
+    default.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path_factory()))))
+    if apps:
+        menu.addSeparator()
+    for name, exec_line in apps:
+        act = menu.addAction(name)
+        act.triggered.connect(lambda _c=False, e=exec_line: launch(e, path_factory()))
+    return menu
 
 
 def send_email(path: Path) -> bool:
     try:
-        subprocess.Popen(["xdg-email", "--attach", str(path)])
+        subprocess.Popen(["xdg-email", "--attach", str(path)], start_new_session=True)
         return True
     except OSError:
         return False
 
 
-def error_dialog(parent, title: str, text: str) -> None:
-    dlg = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=Gtk.MessageType.ERROR,
-                            buttons=Gtk.ButtonsType.CLOSE, text=title)
-    dlg.format_secondary_text(text)
-    dlg.run()
-    dlg.destroy()
+# ------------------------------------------------------------------ dialogs
+def error(parent, title: str, text: str) -> None:
+    box = QMessageBox(QMessageBox.Icon.Warning, title, title, QMessageBox.StandardButton.Close, parent)
+    box.setInformativeText(text)
+    box.exec()
 
 
-def ask(parent, title: str, text: str, ok_label: str = "_OK", destructive: bool = False) -> bool:
-    dlg = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=Gtk.MessageType.QUESTION,
-                            buttons=Gtk.ButtonsType.NONE, text=title)
-    dlg.format_secondary_text(text)
-    dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
-    btn = dlg.add_button(ok_label, Gtk.ResponseType.OK)
+def ask(parent, title: str, text: str, ok_label: str = "OK", destructive: bool = False) -> bool:
+    box = QMessageBox(QMessageBox.Icon.Question, title, title, QMessageBox.StandardButton.NoButton, parent)
+    box.setInformativeText(text)
+    ok = box.addButton(ok_label, QMessageBox.ButtonRole.AcceptRole)
     if destructive:
-        btn.get_style_context().add_class("destructive-action")
-    dlg.set_default_response(Gtk.ResponseType.CANCEL)
-    ok = dlg.run() == Gtk.ResponseType.OK
-    dlg.destroy()
-    return ok
+        ok.setProperty("danger", True)
+    box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+    box.exec()
+    return box.clickedButton() is ok
 
 
 def prompt_text(parent, title: str, label: str, value: str = "", multiline: bool = False) -> str | None:
-    dlg = Gtk.Dialog(title=title, transient_for=parent, modal=True)
-    dlg.add_button("_Cancel", Gtk.ResponseType.CANCEL)
-    dlg.add_button("_OK", Gtk.ResponseType.OK)
-    dlg.set_default_response(Gtk.ResponseType.OK)
-    box = dlg.get_content_area()
-    box.set_spacing(8)
-    box.set_border_width(12)
-    box.add(Gtk.Label(label=label, xalign=0))
-    if multiline:
-        view = Gtk.TextView()
-        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        view.get_buffer().set_text(value)
-        sw = Gtk.ScrolledWindow()
-        sw.set_size_request(360, 120)
-        sw.add(view)
-        box.add(sw)
+    if not multiline:
+        text, ok = QInputDialog.getText(parent, title, label, QLineEdit.EchoMode.Normal, value)
+        return text if ok else None
+    from PyQt6.QtGui import QKeySequence, QShortcut
+    from PyQt6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QPlainTextEdit, QVBoxLayout
 
-        def on_key(_w, ev):
-            if ev.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and ev.state & Gdk.ModifierType.CONTROL_MASK:
-                dlg.response(Gtk.ResponseType.OK)
-                return True
-            return False
-
-        view.connect("key-press-event", on_key)
-        box.add(Gtk.Label(label="Ctrl+Enter to confirm", xalign=0, sensitive=False))
-    else:
-        entry = Gtk.Entry(text=value, activates_default=True)
-        box.add(entry)
-    dlg.show_all()
-    result = None
-    if dlg.run() == Gtk.ResponseType.OK:
-        if multiline:
-            buf = view.get_buffer()
-            result = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
-        else:
-            result = entry.get_text()
-    dlg.destroy()
-    return result
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.resize(420, 220)
+    lay = QVBoxLayout(dlg)
+    lay.addWidget(QLabel(label))
+    edit = QPlainTextEdit(value)
+    lay.addWidget(edit)
+    hint = QLabel("Ctrl+Enter adds it. Enter starts a new line.")
+    hint.setObjectName("muted")
+    lay.addWidget(hint)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+    ok = buttons.addButton("Add" if not value else "Save", QDialogButtonBox.ButtonRole.AcceptRole)
+    ok.setProperty("accent", True)
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    lay.addWidget(buttons)
+    for seq in ("Ctrl+Return", "Ctrl+Enter"):
+        QShortcut(QKeySequence(seq), dlg).activated.connect(dlg.accept)
+    edit.setFocus()
+    return edit.toPlainText() if dlg.exec() else None
 
 
 def human_size(n: int) -> str:
@@ -258,31 +278,6 @@ def human_size(n: int) -> str:
 
 def human_date(ts: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-
-
-def setup_css() -> None:
-    css = b"""
-    .catcap-toolbar button { padding: 4px; min-width: 28px; min-height: 28px; }
-    .catcap-sidebar-header { font-weight: bold; opacity: 0.7; padding: 8px 10px 2px 10px; font-size: 0.9em; }
-    .catcap-sidebar row { padding: 4px 6px; }
-    .catcap-preview-title { font-size: 1.15em; font-weight: bold; }
-    .catcap-dim { opacity: 0.7; }
-    .catcap-countdown { font-size: 64px; font-weight: bold; color: white; background-color: rgba(20,20,24,0.85);
-                        border-radius: 16px; padding: 12px 36px; }
-    .catcap-quickbar { background-color: rgba(30,30,34,0.95); border-radius: 10px; padding: 8px; }
-    .catcap-quickbar-text { color: white; }
-    .catcap-canvas { background-color: #3a3a3f; }
-    .catcap-drag { padding: 2px 8px; border-radius: 4px; }
-    .catcap-drag:hover { background-color: alpha(@theme_fg_color, 0.1); }
-    """
-    provider = Gtk.CssProvider()
-    provider.load_from_data(css)
-    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), provider,
-                                             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-
-
-def file_uri(path: Path) -> str:
-    return Gio.File.new_for_path(str(path)).get_uri()
 
 
 def is_image_path(path: str) -> bool:

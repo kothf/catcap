@@ -2,125 +2,77 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
-import gi
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtDBus import QDBusConnection, QDBusMessage
+from PyQt6.QtGui import QGuiApplication, QIcon
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+from . import APP_ID, APP_NAME, __version__, paths, ui
+from .capture import Snapshot, get_backend, is_wayland
+from .config import Config
+from .library import Library
+from .theme import Theme
 
-from . import APP_ID, APP_NAME, __version__, paths, ui  # noqa: E402
-from .capture import Snapshot, get_backend, is_wayland  # noqa: E402
-from .config import Config  # noqa: E402
-from .library import Library  # noqa: E402
-
-CAPTURE_FLAGS = {"region": "region", "window": "window", "full": "full", "active": "active",
-                 "monitor": "monitor", "last-region": "last_region"}
+CAPTURE_FLAGS = ["region", "window", "full", "active", "monitor", "last_region"]
 
 
-class CatCapApp(Gtk.Application):
-    def __init__(self):
-        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
-        GLib.set_application_name(APP_NAME)
-        GLib.set_prgname(APP_ID)
-        self.config = None
-        self.library = None
-        self.backend = None
-        self.tray = None
-        self.hotkeys = None
-        self.library_window = None
-        self.settings_window = None
-        self.editors = {}
-        self._capturing = False
-        self._hidden = []
-        self._add_options()
+def parse_args(argv):
+    p = argparse.ArgumentParser(prog="catcap", description="Capture, annotate and organise screenshots.")
+    g = p.add_argument_group("capture")
+    g.add_argument("--region", action="store_true", help="capture a region or window")
+    g.add_argument("--window", action="store_true", help="capture a window")
+    g.add_argument("--full", action="store_true", help="capture the whole screen (all monitors)")
+    g.add_argument("--monitor", action="store_true", help="capture the monitor under the pointer")
+    g.add_argument("--active", action="store_true", help="capture the active window")
+    g.add_argument("--last-region", dest="last_region", action="store_true", help="capture the last region again")
+    g.add_argument("-d", "--delay", type=int, help="wait N seconds before capturing")
+    g.add_argument("--cursor", dest="cursor", action="store_true", default=None, help="include the mouse pointer")
+    g.add_argument("--no-cursor", dest="cursor", action="store_false", help="leave the mouse pointer out")
+    a = p.add_argument_group("after capture")
+    a.add_argument("--clipboard", action="store_true", help="copy to the clipboard")
+    a.add_argument("--edit", action="store_true", help="open in the editor")
+    a.add_argument("--save-only", dest="save_only", action="store_true", help="only save to the library")
+    o = p.add_argument_group("other")
+    o.add_argument("--library", action="store_true", help="open the library")
+    o.add_argument("--settings", action="store_true", help="open settings")
+    o.add_argument("--background", action="store_true", help="start in the tray without opening a window")
+    o.add_argument("--release-hotkeys", dest="release_hotkeys", action="store_true",
+                   help="remove CatCap's shortcuts and give Print Screen back to Cinnamon, then exit")
+    o.add_argument("--quit", action="store_true", help="quit the running CatCap")
+    o.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
+    p.add_argument("files", nargs="*", help="image files to open in the editor")
+    return p.parse_args(argv)
 
-    # ================================================================ CLI
-    def _add_options(self):
-        none = GLib.OptionArg.NONE
-        for name, desc in (("region", "Capture a region or window"),
-                           ("window", "Capture a window"),
-                           ("full", "Capture the whole screen (all monitors)"),
-                           ("monitor", "Capture the monitor under the pointer"),
-                           ("active", "Capture the active window"),
-                           ("last-region", "Capture the last selected region again"),
-                           ("library", "Open the library"),
-                           ("settings", "Open settings"),
-                           ("background", "Start in the tray without opening a window"),
-                           ("clipboard", "After capture: copy to clipboard"),
-                           ("edit", "After capture: open in the editor"),
-                           ("save-only", "After capture: only save to the library"),
-                           ("cursor", "Include the mouse pointer"),
-                           ("no-cursor", "Do not include the mouse pointer"),
-                           ("quit", "Quit the running CatCap"),
-                           ("version", "Show version")):
-            self.add_main_option(name, 0, GLib.OptionFlags.NONE, none, desc, None)
-        self.add_main_option("delay", ord("d"), GLib.OptionFlags.NONE, GLib.OptionArg.INT,
-                             "Wait N seconds before capturing", "N")
-        self.add_main_option(GLib.OPTION_REMAINING, 0, GLib.OptionFlags.NONE, GLib.OptionArg.FILENAME_ARRAY,
-                             "Image files to open in the editor", "[FILE…]")
 
-    def do_handle_local_options(self, options):
-        if options.contains("version"):
-            print(f"{APP_NAME} {__version__}")
-            return 0
-        return -1
+def socket_name() -> str:
+    return f"catcap-{os.getuid()}"
 
-    def do_command_line(self, command_line):
-        opts = command_line.get_options_dict().end().unpack()
-        if opts.get("quit"):
-            self.quit()
-            return 0
-        action = None
-        if opts.get("clipboard"):
-            action = "clipboard"
-        elif opts.get("edit"):
-            action = "editor"
-        elif opts.get("save-only"):
-            action = "library"
-        cursor = True if opts.get("cursor") else (False if opts.get("no-cursor") else None)
-        delay = opts.get("delay")
-        files = opts.get(GLib.OPTION_REMAINING) or []
-        cwd = command_line.get_cwd() or os.getcwd()
-        did_something = False
-        for flag, mode in CAPTURE_FLAGS.items():
-            if opts.get(flag):
-                self.start_capture(mode, delay=delay, action=action, cursor=cursor)
-                did_something = True
-                break
-        for f in files:
-            path = f.decode() if isinstance(f, bytes) else f
-            path = os.path.join(cwd, path)
-            try:
-                cid = self.library.import_file(path)
-                self.open_editor(cid)
-            except Exception as exc:
-                print(f"catcap: cannot open {path}: {exc}", file=sys.stderr)
-            did_something = True
-        if opts.get("settings"):
-            self.show_settings()
-            did_something = True
-        if opts.get("library"):
-            self.show_library()
-            did_something = True
-        if not did_something and not opts.get("background"):
-            self.show_library()
-            self._maybe_first_run()
-        return 0
 
-    # ================================================================ lifecycle
-    def do_startup(self):
-        Gtk.Application.do_startup(self)
-        ui.setup_css()
-        root = paths.source_root()
-        if root is not None:
-            Gtk.IconTheme.get_default().append_search_path(str(root / "data" / "icons"))
-        Gtk.Window.set_default_icon_name(APP_ID)
+def icon_file() -> str:
+    root = paths.source_root()
+    if root is not None:
+        return str(root / "data/icons/hicolor/scalable/apps" / f"{APP_ID}.svg")
+    return f"/usr/share/icons/hicolor/scalable/apps/{APP_ID}.svg"
+
+
+class CatCap:
+    def __init__(self, qapp: QApplication):
+        self.qapp = qapp
         self.config = Config()
+        self.theme = Theme(self.config.get("general", "theme"))
+        self.theme.apply(qapp)
+        self.app_icon = QIcon.fromTheme(APP_ID, QIcon(icon_file()))
+        self.tray_icon = self.app_icon
+        qapp.setWindowIcon(self.app_icon)
         self.library = Library(self.config.images_dir())
         try:
             self.library.purge_trash(int(self.config.get("library", "trash_days")))
@@ -129,25 +81,62 @@ class CatCapApp(Gtk.Application):
         ui.cleanup_temp()
         self.backend = get_backend()
         from .hotkeys import HotkeyManager
-        from .tray import Tray
 
-        self.hotkeys = HotkeyManager(self)
+        self.hotkeys = HotkeyManager(self.config)
         if self.config.get("hotkeys", "enabled"):
-            try:
-                self.hotkeys.apply()
-            except Exception as exc:
-                print(f"catcap: hotkeys: {exc}")
+            self.hotkeys.apply()
+        self.tray = None
         if os.environ.get("CATCAP_NO_TRAY") != "1":
-            self.tray = Tray(self)
-        show = Gio.SimpleAction.new("show-capture", GLib.VariantType.new("s"))
-        show.connect("activate", lambda _a, v: self.show_library(v.get_string()))
-        self.add_action(show)
-        self.hold()
+            from .tray import Tray
 
-    def do_shutdown(self):
-        if self.library is not None:
-            self.library.close()
-        Gtk.Application.do_shutdown(self)
+            self.tray = Tray(self)
+        self.library_window = None
+        self.settings_window = None
+        self.editors: dict = {}
+        self._capturing = False
+        self._hidden: list = []
+        self._keep = []   # keep top-level helper windows alive
+
+    def apply_theme(self):
+        self.theme = Theme(self.config.get("general", "theme"))
+        self.theme.apply(self.qapp)
+
+    def quit(self):
+        self.qapp.quit()
+
+    # ================================================================ command handling
+    def handle(self, args: dict, cwd: str):
+        if args.get("quit"):
+            self.quit()
+            return
+        if args.get("release_hotkeys"):
+            self.config.set("hotkeys", "enabled", False)
+            self.hotkeys.remove()
+            return
+        action = "clipboard" if args.get("clipboard") else "editor" if args.get("edit") else (
+            "library" if args.get("save_only") else None)
+        did = False
+        for mode in CAPTURE_FLAGS:
+            if args.get(mode):
+                self.start_capture(mode, delay=args.get("delay"), action=action, cursor=args.get("cursor"))
+                did = True
+                break
+        for f in args.get("files") or []:
+            path = os.path.join(cwd, f)
+            try:
+                self.open_editor(self.library.import_file(path))
+            except Exception as exc:
+                print(f"catcap: cannot open {path}: {exc}", file=sys.stderr)
+            did = True
+        if args.get("settings"):
+            self.show_settings()
+            did = True
+        if args.get("library"):
+            self.show_library()
+            did = True
+        if not did and not args.get("background"):
+            self.show_library()
+            QTimer.singleShot(300, self._maybe_welcome)
 
     # ================================================================ capture workflow
     def start_capture(self, mode: str, delay: int | None = None, action: str | None = None,
@@ -155,23 +144,22 @@ class CatCapApp(Gtk.Application):
         if self._capturing:
             return
         self._capturing = True
-        if delay is None:
-            delay = int(self.config.get("capture", "delay"))
+        delay = int(self.config.get("capture", "delay")) if delay is None else delay
         self._hidden = []
         if hide is not None:
-            for win in self.get_windows():
-                if win.get_visible() and win.get_window_type() == Gtk.WindowType.TOPLEVEL:
+            for win in QApplication.topLevelWidgets():
+                if win.isVisible() and win.isWindow() and not isinstance(win, QMessageBox):
                     win.hide()
                     self._hidden.append(win)
-        wait = 350 if self._hidden else 180
+        wait = 380 if self._hidden else 200
 
         def go():
-            GLib.timeout_add(wait, self._grab, mode, action, cursor)
+            QTimer.singleShot(wait, lambda: self._grab(mode, action, cursor))
 
         if delay and delay > 0:
             from .widgets import Countdown
 
-            Countdown(delay, go, on_cancel=self._end_capture)
+            self._keep.append(Countdown(delay, go, on_cancel=self._end_capture))
         else:
             go()
 
@@ -194,20 +182,18 @@ class CatCapApp(Gtk.Application):
             self.backend.pick_window(done)
         else:
             self.backend.snapshot(done, include_cursor)
-        return False
 
     def _handle_snapshot(self, snap: Snapshot, mode: str, action):
         if mode == "full" or (self.backend.name == "wayland" and mode in ("window", "active")):
-            info = snap.active
-            self._store(snap.pixbuf, "full" if mode == "full" else mode, info, action)
+            self._store(snap.image, "full" if mode == "full" else mode, snap.active, action)
         elif mode == "monitor":
             mon = snap.monitor_at(*snap.pointer)
-            name, x, y, w, h = mon if mon else ("", 0, 0, snap.pixbuf.get_width(), snap.pixbuf.get_height())
+            name, x, y, w, h = mon if mon else ("", 0, 0, snap.image.width(), snap.image.height())
             self._store(snap.crop(x, y, w, h), "monitor", None, action, monitor=name)
         elif mode == "active":
             win = snap.active
             if win is None:
-                self._store(snap.pixbuf, "full", None, action)
+                self._store(snap.image, "full", None, action)
             else:
                 x, y, w, h = win.rect(bool(self.config.get("capture", "window_decorations")))
                 self._store(snap.crop(x, y, w, h), "active", win, action)
@@ -218,9 +204,8 @@ class CatCapApp(Gtk.Application):
             self._open_overlay(snap, "window" if mode == "window" else "region", action)
 
     def _last_region(self):
-        raw = self.config.get("state", "last_region")
         try:
-            x, y, w, h = [int(v) for v in raw.split(",")]
+            x, y, w, h = [int(v) for v in self.config.get("state", "last_region").split(",")]
             return (x, y, w, h) if w > 0 and h > 0 else None
         except ValueError:
             return None
@@ -228,17 +213,15 @@ class CatCapApp(Gtk.Application):
     def _open_overlay(self, snap: Snapshot, mode: str, action):
         from .overlay import Overlay
 
-        monitor_index = 0
         offset = (0, 0)
+        screen = None
         if snap.backend == "wayland":
-            display = Gdk.Display.get_default()
-            primary = display.get_primary_monitor() or display.get_monitor(0)
-            for i in range(display.get_n_monitors()):
-                if display.get_monitor(i) == primary:
-                    monitor_index = i
-            _n, x, y, w, h = snap.monitors[monitor_index] if snap.monitors else (
-                "", 0, 0, snap.pixbuf.get_width(), snap.pixbuf.get_height())
-            snap = Snapshot(pixbuf=snap.crop(x, y, w, h), scale=snap.scale, backend="wayland")
+            screen = QGuiApplication.primaryScreen()
+            screens = QGuiApplication.screens()
+            index = screens.index(screen) if screen in screens else 0
+            _n, x, y, w, h = snap.monitors[index] if index < len(snap.monitors) else (
+                "", 0, 0, snap.image.width(), snap.image.height())
+            snap = Snapshot(image=snap.crop(x, y, w, h), scale=snap.scale, backend="wayland")
             offset = (x, y)
 
         def done(result):
@@ -248,44 +231,46 @@ class CatCapApp(Gtk.Application):
             x, y, w, h = result.rect
             self.config.set("state", "last_region", f"{x + offset[0]},{y + offset[1]},{w},{h}")
             info = type("Info", (), {"app": result.app, "title": result.title})()
-            chosen = {"copy": "clipboard", "edit": "editor", "pin": "pin", "save": "library"}.get(result.action)
-            self._store(result.pixbuf, result.mode, info, chosen or action)
+            chosen = {"copy": "clipboard", "edit": "editor", "pin": "pin"}.get(result.action)
+            self._store(result.image, result.mode, info, chosen or action)
 
-        Overlay(snap, mode, self.config, done, monitor_index).start()
+        overlay = Overlay(snap, mode, self.config, done, screen)
+        self._keep.append(overlay)
+        overlay.destroyed.connect(lambda *_: self._keep.remove(overlay) if overlay in self._keep else None)
+        overlay.start()
 
-    def _store(self, pixbuf, mode, info, action, monitor=""):
-        app_name = getattr(info, "app", "") if info else ""
-        title = getattr(info, "title", "") if info else ""
-        cid = self.library.add_capture(pixbuf, mode=mode, app=app_name, title=title, monitor=monitor)
+    def _store(self, image, mode, info, action, monitor=""):
+        cid = self.library.add_capture(image, mode=mode, app=getattr(info, "app", "") if info else "",
+                                       title=getattr(info, "title", "") if info else "", monitor=monitor)
         self._play_sound()
         action = action or self.config.get("capture", "after_action")
-        self._end_capture(keep_hidden=action == "editor")
+        self._end_capture(restore=action != "editor")
+        size = f"{image.width()} × {image.height()}"
         if action == "editor":
             self.open_editor(cid)
         elif action == "clipboard":
             ui.copy_capture(self.library, cid)
-            self.notify("Copied to clipboard", f"{pixbuf.get_width()} × {pixbuf.get_height()} · saved in library", cid)
+            self.notify("Copied to the clipboard", f"{size}, also saved in your library")
         elif action == "pin":
             from . import render
 
-            self.pin_surface(render.render_capture(self.library, cid))
+            self.pin_image(render.render_capture(self.library, cid))
         elif action == "library":
-            self.notify("Capture saved", f"{pixbuf.get_width()} × {pixbuf.get_height()}", cid)
+            self.notify("Capture saved", size)
         else:
             from .widgets import QuickBar
 
-            QuickBar(self, cid)
+            bar = QuickBar(self, cid)
+            self._keep.append(bar)
+            bar.destroyed.connect(lambda *_: self._keep.remove(bar) if bar in self._keep else None)
         return cid
 
-    def _end_capture(self, keep_hidden=False):
+    def _end_capture(self, restore=True):
         self._capturing = False
         for win in self._hidden:
-            try:
-                win.show()
-                if not keep_hidden:
-                    win.present()
-            except Exception:
-                pass
+            win.show()
+            if restore:
+                win.raise_()
         self._hidden = []
 
     def _play_sound(self):
@@ -293,21 +278,22 @@ class CatCapApp(Gtk.Application):
             return
         if shutil.which("canberra-gtk-play"):
             subprocess.Popen(["canberra-gtk-play", "-i", "camera-shutter"], stderr=subprocess.DEVNULL)
-            return
-        oga = "/usr/share/sounds/freedesktop/stereo/camera-shutter.oga"
-        if os.path.exists(oga) and shutil.which("paplay"):
-            subprocess.Popen(["paplay", oga], stderr=subprocess.DEVNULL)
+        elif shutil.which("paplay") and os.path.exists("/usr/share/sounds/freedesktop/stereo/camera-shutter.oga"):
+            subprocess.Popen(["paplay", "/usr/share/sounds/freedesktop/stereo/camera-shutter.oga"],
+                             stderr=subprocess.DEVNULL)
 
-    def notify(self, title, body, capture_id=None, error=False):
-        if not error and not self.config.get("general", "notifications"):
-            return
-        n = Gio.Notification.new(title)
-        n.set_body(body)
-        if capture_id:
-            n.set_default_action(f"app.show-capture('{capture_id}')")
-        self.send_notification(None, n)
+    def notify(self, title, body, error=False):
         if error:
             print(f"catcap: {title}: {body}", file=sys.stderr)
+        elif not self.config.get("general", "notifications"):
+            return
+        msg = QDBusMessage.createMethodCall("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                                            "org.freedesktop.Notifications", "Notify")
+        msg.setArguments([APP_NAME, 0, icon_file(), title, body, [], {}, 4000])
+        reply = QDBusConnection.sessionBus().call(msg, timeout=1500)
+        if reply.type() == QDBusMessage.MessageType.ErrorMessage:
+            if not (self.tray and self.tray.message(title, body)) and error:
+                ui.error(None, title, body)
 
     # ================================================================ windows
     def show_library(self, select_id: str | None = None):
@@ -315,13 +301,13 @@ class CatCapApp(Gtk.Application):
 
         if self.library_window is None:
             self.library_window = LibraryWindow(self)
-            self.library_window.connect("destroy", self._on_library_destroy)
-        self.library_window.present()
+            self.library_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            self.library_window.destroyed.connect(lambda *_: setattr(self, "library_window", None))
+        self.library_window.show()
+        self.library_window.raise_()
+        self.library_window.activateWindow()
         if select_id:
-            GLib.timeout_add(150, lambda: (self.library_window and self.library_window.select_capture(select_id), False)[1])
-
-    def _on_library_destroy(self, *_):
-        self.library_window = None
+            QTimer.singleShot(200, lambda: self.library_window and self.library_window.select_capture(select_id))
 
     def open_editor(self, capture_id: str):
         from .editor import Editor
@@ -330,108 +316,126 @@ class CatCapApp(Gtk.Application):
         if editor is None:
             editor = Editor(self, capture_id)
             self.editors[capture_id] = editor
-            editor.connect("destroy", lambda *_: self.editors.pop(capture_id, None))
-        editor.present()
+            editor.destroyed.connect(lambda *_: self.editors.pop(capture_id, None))
+        editor.show()
+        editor.raise_()
+        editor.activateWindow()
         return editor
 
-    def pin_surface(self, surface):
+    def pin_image(self, image):
         from .widgets import PinWindow
 
-        win = PinWindow(self, surface)
-        self.add_window(win)
-        win.present()
+        pin = PinWindow(self, image)
+        self._keep.append(pin)
+        pin.destroyed.connect(lambda *_: self._keep.remove(pin) if pin in self._keep else None)
+        pin.show()
 
     def show_settings(self, parent=None):
         from .settings_window import SettingsWindow
 
         if self.settings_window is None:
             self.settings_window = SettingsWindow(self, parent)
-            self.add_window(self.settings_window)
-            self.settings_window.connect("destroy", lambda *_: setattr(self, "settings_window", None))
-        self.settings_window.present()
+            self.settings_window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            self.settings_window.destroyed.connect(lambda *_: setattr(self, "settings_window", None))
+        self.settings_window.show()
+        self.settings_window.raise_()
 
     def show_shortcuts(self, parent=None):
         from .widgets import show_shortcuts
 
-        show_shortcuts(parent)
+        self._keep.append(show_shortcuts(parent))
 
     def show_about(self, parent=None):
-        dlg = Gtk.AboutDialog(transient_for=parent, modal=True)
-        dlg.set_program_name(APP_NAME)
-        dlg.set_version(__version__)
-        dlg.set_logo_icon_name(APP_ID)
-        dlg.set_comments("Screenshot capture, annotation and library for Linux Mint.")
-        dlg.set_website("https://github.com/kothf/catcap")
-        dlg.set_license_type(Gtk.License.MIT_X11)
-        dlg.run()
-        dlg.destroy()
+        QMessageBox.about(parent, "About CatCap",
+                          f"<h3>CatCap {__version__}</h3><p>Capture, annotate and organise screenshots on Linux Mint.</p>"
+                          "<p>MIT licence · <a href='https://github.com/kothf/catcap'>github.com/kothf/catcap</a></p>")
 
     def update_autostart(self):
         target = paths.autostart_dir() / f"{APP_ID}.desktop"
         if self.config.get("general", "start_at_login"):
             paths.ensure_dir(target.parent, private=False)
-            target.write_text(
-                "[Desktop Entry]\nType=Application\nName=CatCap\nComment=Screenshot tool (tray)\n"
-                f"Exec={paths.launcher()} --background\nIcon={APP_ID}\nTerminal=false\n"
-                "X-GNOME-Autostart-enabled=true\nNoDisplay=false\n", encoding="utf-8")
+            target.write_text("[Desktop Entry]\nType=Application\nName=CatCap\nComment=Screenshot tool (tray)\n"
+                              f"Exec={paths.launcher()} --background\nIcon={APP_ID}\nTerminal=false\n"
+                              "X-GNOME-Autostart-enabled=true\n", encoding="utf-8")
         else:
             try:
                 target.unlink()
             except FileNotFoundError:
                 pass
 
-    # ================================================================ first run
-    def _maybe_first_run(self):
+    def _maybe_welcome(self):
         if self.config.get("general", "first_run_done"):
             return
         self.config.set("general", "first_run_done", True)
         from .hotkeys import is_cinnamon
+        from .widgets import WelcomeDialog
 
-        parent = self.library_window
-        dlg = Gtk.Dialog(title="Welcome to CatCap", transient_for=parent, modal=True)
-        dlg.add_button("_Start", Gtk.ResponseType.OK)
-        box = dlg.get_content_area()
-        box.set_spacing(12)
-        box.set_border_width(18)
-        title = Gtk.Label(xalign=0)
-        title.set_markup("<big><b>Welcome to CatCap</b></big>")
-        box.add(title)
-        box.add(Gtk.Label(label="A few choices to get started. You can change them later in Settings.",
-                          xalign=0, wrap=True))
-        print_check = Gtk.CheckButton(label="Use Print Screen and the other screenshot keys for CatCap",
-                                      active=True)
-        if not is_cinnamon():
-            print_check.set_label("Enable global hotkeys (Print Screen and friends)")
-        box.add(print_check)
-        login_check = Gtk.CheckButton(label="Start CatCap at login (tray icon)", active=True)
-        box.add(login_check)
-        row = Gtk.Box(spacing=10)
-        row.add(Gtk.Label(label="After a capture:"))
-        combo = Gtk.ComboBoxText()
-        from .settings_window import AFTER_ACTIONS
-
-        for k, text in AFTER_ACTIONS:
-            combo.append(k, text)
-        combo.set_active_id(self.config.get("capture", "after_action"))
-        row.add(combo)
-        box.add(row)
-        if is_wayland():
-            note = Gtk.Label(label="You are in a Wayland session: screenshots go through the desktop's "
-                                   "screenshot portal, which may ask for permission the first time.",
-                             xalign=0, wrap=True, max_width_chars=60)
-            box.add(note)
-        dlg.show_all()
-        dlg.run()
-        self.config.set("hotkeys", "enabled", print_check.get_active())
-        self.config.set("general", "start_at_login", login_check.get_active())
-        self.config.set("capture", "after_action", combo.get_active_id() or "toolbar")
-        dlg.destroy()
+        dlg = WelcomeDialog(self, is_cinnamon(), is_wayland())
+        dlg.exec()
+        self.config.set("hotkeys", "enabled", dlg.print_check.isChecked())
+        self.config.set("hotkeys", "take_over_print", dlg.print_check.isChecked())
+        self.config.set("general", "start_at_login", dlg.login_check.isChecked())
+        self.config.set("capture", "after_action", dlg.after.currentData() or "toolbar")
         self.update_autostart()
         warnings = self.hotkeys.apply()
         if warnings:
-            ui.error_dialog(parent, "Hotkeys need attention", "\n".join(warnings))
+            ui.error(self.library_window, "Hotkeys need attention", "\n".join(warnings))
+
+
+def _forward(payload: bytes) -> bool:
+    sock = QLocalSocket()
+    sock.connectToServer(socket_name())
+    if not sock.waitForConnected(400):
+        return False
+    sock.write(payload)
+    sock.flush()
+    sock.waitForBytesWritten(1000)
+    sock.disconnectFromServer()
+    return True
 
 
 def main(argv=None) -> int:
-    app = CatCapApp()
-    return app.run(argv if argv is not None else sys.argv)
+    argv = sys.argv[1:] if argv is None else argv
+    args = parse_args(argv)
+    payload = json.dumps({"args": vars(args), "cwd": os.getcwd()}).encode()
+    QApplication.setApplicationName(APP_NAME)
+    QApplication.setDesktopFileName(APP_ID)
+    qapp = QApplication([sys.argv[0]])
+    qapp.setQuitOnLastWindowClosed(False)
+    if _forward(payload):
+        return 0
+    if args.quit:
+        return 0
+    if args.release_hotkeys:
+        from .hotkeys import HotkeyManager
+
+        config = Config()
+        config.set("hotkeys", "enabled", False)
+        HotkeyManager(config).remove()
+        print("CatCap hotkeys removed; Cinnamon's screenshot keys are restored.")
+        return 0
+    app = CatCap(qapp)
+    server = QLocalServer()
+    QLocalServer.removeServer(socket_name())
+    server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+    server.listen(socket_name())
+
+    def on_connection():
+        conn = server.nextPendingConnection()
+
+        def read():
+            if not conn.canReadLine() and conn.bytesAvailable() == 0:
+                return
+            data = bytes(conn.readAll())
+            try:
+                msg = json.loads(data.decode())
+                app.handle(msg.get("args", {}), msg.get("cwd", str(Path.home())))
+            except ValueError:
+                pass
+
+        conn.readyRead.connect(read)
+        conn.disconnected.connect(conn.deleteLater)
+
+    server.newConnection.connect(on_connection)
+    QTimer.singleShot(0, lambda: app.handle(vars(args), os.getcwd()))
+    return qapp.exec()
