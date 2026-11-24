@@ -32,6 +32,12 @@ Global hotkeys (Print Screen and friends) are switched on in the welcome dialog 
 **Settings › Hotkeys**. On Cinnamon they are registered as Cinnamon custom shortcuts, so they
 also work in the Wayland session.
 
+## Which Linux Mint?
+
+The `.deb` package is for **Linux Mint 22 or newer** (Ubuntu 24.04 base), which ships PyQt6.
+Linux Mint 21 has no PyQt6 package: run CatCap from this folder instead; `./install-deps.sh`
+then installs PyQt6 with pip for your user.
+
 ## Install as a .deb package
 
 ```bash

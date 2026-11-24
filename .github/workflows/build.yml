@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04   # same base as Linux Mint 21 (Python 3.10, Qt 6.2): the oldest target
+    runs-on: ubuntu-24.04   # same base as Linux Mint 22 (Python 3.12, Qt 6.4)
     steps:
       - uses: actions/checkout@v4
 
