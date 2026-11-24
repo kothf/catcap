@@ -20,7 +20,7 @@ MIN_DRAG = 4
 CHROME = QColor(30, 33, 37, 235)
 ACTIONS = [("capture", "Capture", "check"), ("copy", "Copy", "copy"), ("edit", "Edit", "edit"),
            ("pin", "Pin", "pin"), ("cancel", "", "close")]
-# Flameshot-style drawing tools shown beside the selection. "select" adjusts the area.
+# Drawing tools shown beside the selection. "select" adjusts the area.
 DRAW_TOOLS = [("select", "Move or resize the area"), ("pen", "Pen"), ("line", "Line"), ("arrow", "Arrow"),
               ("rect", "Rectangle"), ("ellipse", "Ellipse"), ("highlighter", "Marker"), ("text", "Text"),
               ("step", "Numbered step"), ("blur", "Blur"), ("pixelate", "Pixelate"), ("redact", "Redact")]
@@ -307,7 +307,7 @@ class Overlay(QWidget):
         self.update()
 
     def wheelEvent(self, ev):
-        # Like Flameshot: the wheel sets the thickness of the current tool.
+        # The wheel sets the thickness of the current tool.
         if self.state != "selected" or self.tool in ("select", "text"):
             return
         step = 1 if ev.angleDelta().y() > 0 else -1
